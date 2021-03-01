@@ -1,0 +1,2 @@
+load_a load workloads/workloada
+run_a run workloads/workloada

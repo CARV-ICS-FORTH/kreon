@@ -1,0 +1,6 @@
+.DS_Store
+build/
+*.o
+*.so*
+*.bin
+*.gitlab-ci-local

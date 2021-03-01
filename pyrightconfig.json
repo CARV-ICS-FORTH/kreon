@@ -1,0 +1,24 @@
+{
+    "exclude": [
+        "**/node_modules",
+        "**/__pycache__",
+        "**/build",
+        "scripts/gitlint"
+    ],
+    "typeCheckingMode": "basic",
+    "reportMissingImports": true,
+    "reportMissingTypeStubs": false,
+    "reportUnusedImport":true,
+    "reportDuplicateImports":true,
+    "reportImportCycles":true,
+    "reportOptionalCall":true,
+    "reportOptionalIterable":true,
+    "reportOptionalContextManager":true,
+    "reportOptionalOperand":true,
+    "reportUntypedFunctionDecorator":true,
+    "reportUntypedClassDecorator":true,
+    "reportInvalidStringEscapeSequence":true,
+    "reportCallInDefaultInitializer":true,
+    "reportUnnecessaryCast":true,
+    "pythonPlatform": "Linux"
+}

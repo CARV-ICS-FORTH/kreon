@@ -1,0 +1,49 @@
+image: carvicsforth/arch_carv:latest
+
+stages:
+  - build
+  - deploy
+
+build_gcc:
+  stage: build
+  script:
+    - mkdir -p build;cd build
+    - cmake .. -DCMAKE_BUILD_TYPE=Debug
+    - make all
+
+build_clang:
+  stage: build
+  script:
+    - mkdir -p build;cd build
+    - cmake .. -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+    - make all
+
+build_clang-tidy:
+  stage: build
+  script:
+    - mkdir -p build;cd build
+    - cmake .. "-DCMAKE_C_CLANG_TIDY=/bin/clang-tidy;-checks=* --format-style=../.clang-format"
+    - make all
+
+# install_kreon:
+#   image: carvicsforth/ubuntu_carv:latest
+#   stage: deploy
+#   variables:
+#     KREON_INSTALL_PATH : "installtest"
+#   script:
+#     - mkdir -p build;cd build
+#     - cmake .. -DKREON_BUILD_CPACK=True -DCMAKE_BUILD_TYPE=Debug -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=gcc-10 -DCMAKE_CXX_COMPILER=g++-10
+#     - make install DESTDIR=$KREON_INSTALL_PATH;mv $KREON_INSTALL_PATH ../scripts/;cd ../scripts
+#     - ./verify-installed-files.py $KREON_INSTALL_PATH
+
+pre-commit:
+  stage: build
+  script:
+    - ./scripts/pre-commit-CI.sh
+pre-merge:
+  stage: build
+  script:
+    - ./scripts/pre-merge-CI.sh
+    - ./scripts/commit-msg-lint.py
+  only:
+    - merge_requests

@@ -1,0 +1,9 @@
+# File: kreon/CMakeLists.txt Author: Michalis Vardoulakis <mvard@ics.forth.gr>
+
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+set_source_files_properties(test_scans.c PROPERTIES COMPILE_FLAGS "-O3 -w")
+set(CMAKE_EXE_LINKER_FLAGS "-Wl,-no-as-needed -lm -lrt -pthread -lnuma")
+
+add_executable(test_scans test_scans.c)
+target_link_libraries(test_scans kreon)
