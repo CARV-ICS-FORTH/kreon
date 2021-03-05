@@ -49,6 +49,7 @@
 //#define USE_MLOCK
 #define __NR_mlock2 284
 #define PAGE_SIZE 4096
+#define BITS_PER_BYTE 8
 
 LIST *mappedVolumes = NULL;
 int32_t DMAP_ACTIVATED = 1;
@@ -209,7 +210,7 @@ int32_t volume_init(char *dev_name, int64_t start, int64_t size, int typeOfVolum
 	uint64_t dev_addressed_in_blocks;
 	int64_t unmapped_blocks;
 	uint64_t offset;
-	void *buffer;
+
 	superblock *dev_superblock;
 	pr_system_catalogue sys_catalogue;
 	uint32_t i;
@@ -243,7 +244,9 @@ int32_t volume_init(char *dev_name, int64_t start, int64_t size, int typeOfVolum
 		__FILE__, __func__, __LINE__, dev_name, start, size, typeOfVolume, "\033[0m");
 
 	dev_size_in_blocks = size / DEVICE_BLOCK_SIZE;
-	buffer = malloc(DEVICE_BLOCK_SIZE);
+
+	char *buffer = (char *)calloc(1, DEVICE_BLOCK_SIZE);
+
 	if ((fd = open(dev_name, O_RDWR)) == -1) {
 		log_fatal("code = %d,  ERROR = %s for device %s\n", errno, strerror(errno), dev_name);
 		exit(EXIT_FAILURE);
@@ -266,11 +269,9 @@ int32_t volume_init(char *dev_name, int64_t start, int64_t size, int typeOfVolum
 		}
 		// XXX Nothing more to do! volume_init() will touch all the other metadata
 		// XXX and this will change the bit values to 1.
-	} else {
-		log_info("\"%s\" is not a fake_blk device!", dev_name);
-	}
+	} else
+		log_info("Volume: %s is not a fake_blk device!", dev_name);
 
-	/*<gesalous>*/
 	/*
 * Finally, we are going to initiate the bitmap of the device. The idea is the
 * following:
@@ -320,32 +321,76 @@ int32_t volume_init(char *dev_name, int64_t start, int64_t size, int typeOfVolum
 		offset += 4096;
 	}
 
-	/*do we need to pad? addresses need to be aligned at SEGMENT_SIZE
-* granularity*/
+	//do we need to pad? addresses need to be aligned at SEGMENT_SIZE granularity
+	//reserve the first SEGMENT_SIZE for the initial version of the superindex
 	uint64_t pad = (start + ((1 + FREE_LOG_SIZE + bitmap_size_in_blocks) * DEVICE_BLOCK_SIZE)) % SEGMENT_SIZE;
 	pad = SEGMENT_SIZE - pad;
-	log_info("need to pad %llu bytes for alignment purposes", (LLU)pad);
-	/*reserve the first SEGMENT_SIZE for the initial version of the
-* superindex*/
-	int bitmap_bytes = ((SEGMENT_SIZE + pad) / DEVICE_BLOCK_SIZE) / sizeof(uint64_t);
-	int bitmap_bits = ((SEGMENT_SIZE + pad) / DEVICE_BLOCK_SIZE) % sizeof(uint64_t);
-
-	memset(buffer + sizeof(uint64_t), 0x00, bitmap_bytes);
-	char tmp = 0xFF;
-	if (bitmap_bits != 0) {
-		tmp = (tmp >> bitmap_bits) << bitmap_bits;
-		memcpy(buffer + sizeof(uint64_t) + bitmap_bytes, &tmp, sizeof(char));
+	log_info("Padding %llu bytes for alignment purposes", (LLU)pad);
+	struct bitmap_bit {
+		char b0 : 1;
+		char b1 : 1;
+		char b2 : 1;
+		char b3 : 1;
+		char b4 : 1;
+		char b5 : 1;
+		char b6 : 1;
+		char b7 : 1;
+	};
+	struct bitmap_bit *bits = (struct bitmap_bit *)(buffer + sizeof(uint64_t));
+	int total_bitmap_bits = (SEGMENT_SIZE + pad) / DEVICE_BLOCK_SIZE;
+	for (int i = 0; i < total_bitmap_bits; i++) {
+		int mod_pos = i / BITS_PER_BYTE;
+		int mode = i % BITS_PER_BYTE;
+		switch (mode) {
+		case 0:
+			bits[mod_pos].b0 = 0;
+			break;
+		case 1:
+			bits[mod_pos].b1 = 0;
+			break;
+		case 2:
+			bits[mod_pos].b2 = 0;
+			break;
+		case 3:
+			bits[mod_pos].b3 = 0;
+			break;
+		case 4:
+			bits[mod_pos].b4 = 0;
+			break;
+		case 5:
+			bits[mod_pos].b5 = 0;
+			break;
+		case 6:
+			bits[mod_pos].b6 = 0;
+			break;
+		case 7:
+			bits[mod_pos].b7 = 0;
+			break;
+		default:
+			log_fatal("Wrong modulo operation");
+			exit(EXIT_FAILURE);
+		}
 	}
-	fprintf(stderr,
-		"[%s:%s:%d] reserved for SEGMENT_SIZE %d bitmap_bytes "
-		"%d and bitmap_bits %d\n",
-		__FILE__, __func__, __LINE__, SEGMENT_SIZE, bitmap_bytes, bitmap_bits);
+
+	//int bitmap_bytes = ((SEGMENT_SIZE + pad) / DEVICE_BLOCK_SIZE) / sizeof(uint64_t);
+	//uint32_t bitmap_bits = ((SEGMENT_SIZE + pad) / DEVICE_BLOCK_SIZE) % sizeof(uint64_t);
+	//log_info("Bitmap bits %u", bitmap_bits);
+	//memset(buffer + sizeof(uint64_t), 0x00, bitmap_bytes);
+	//char tmp = 0xFF;
+	//if (bitmap_bits != 0) {
+	//	tmp = (tmp >> bitmap_bits) << bitmap_bits;
+	//	memcpy(buffer + sizeof(uint64_t) + bitmap_bytes, &tmp, sizeof(char));
+	//}
+	//fprintf(stderr,
+	//	"[%s:%s:%d] reserved for SEGMENT_SIZE %d bitmap_bytes "
+	//	"%d and bitmap_bits %d\n",
+	//	__FILE__, __func__, __LINE__, SEGMENT_SIZE, bitmap_bytes, bitmap_bits);
 
 	/*write it now*/
 	offset = start + 4096 + (FREE_LOG_SIZE * 4096);
-	if (lwrite(fd, (off_t)offset, SEEK_SET, buffer, (size_t)DEVICE_BLOCK_SIZE) == -1) {
+	if (lwrite(fd, offset, SEEK_SET, buffer, (size_t)DEVICE_BLOCK_SIZE) == -1) {
 		fprintf(stderr, "Function = %s, code = %d,  ERROR = %s\n", __func__, errno, strerror(errno));
-		return -1;
+		exit(EXIT_FAILURE);
 	}
 
 	/*mark also it's buddy block */
