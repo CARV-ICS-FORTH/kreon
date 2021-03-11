@@ -47,6 +47,7 @@ segment_header *seg_get_raw_index_segment(volume_descriptor *volume_desc, level_
 segment_header *seg_get_raw_log_segment(volume_descriptor *volume_desc);
 void free_raw_segment(volume_descriptor *volume_desc, segment_header *segment);
 
-void *get_space_for_system(volume_descriptor *volume_desc, uint32_t size);
+void *get_space_for_system(volume_descriptor *volume_desc, uint32_t size, int lock);
+void delete_system_space(volume_descriptor *volume_desc, void *addr, uint32_t length);
 
 void seg_free_level(db_handle *handle, uint8_t level_id, uint8_t tree_id);

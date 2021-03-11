@@ -49,6 +49,10 @@
 //#define USE_MLOCK
 #define __NR_mlock2 284
 #define PAGE_SIZE 4096
+#define WORD_SIZE_IN_BITS 64
+#define LOG_WORD_SIZE_IN_BITS 8
+/*Bytes addressed per bitmap block*/
+#define BLOCKS_PER_BUDDY_PAIR ((DEVICE_BLOCK_SIZE - 8) * 8)
 #define BITS_PER_BYTE 8
 
 LIST *mappedVolumes = NULL;
@@ -74,7 +78,6 @@ unsigned long long find_prefix_miss;
 unsigned long long scan_prefix_hit;
 unsigned long long scan_prefix_miss;
 
-uint64_t highest_bit_mask = 0x8000000000000000;
 extern db_handle *open_dbs;
 pthread_mutex_t VOLUME_LOCK = PTHREAD_MUTEX_INITIALIZER;
 // volatile uint64_t snapshot_v1;
@@ -82,7 +85,6 @@ pthread_mutex_t VOLUME_LOCK = PTHREAD_MUTEX_INITIALIZER;
 
 uint64_t MAPPED = 0; /*from this address any node can see the entire volume*/
 int FD;
-static inline void *next_word(volume_descriptor *volume_desc, unsigned char op_code);
 
 /*
  * Input: File descriptor, offset, relative position to where it has to be
@@ -116,27 +118,15 @@ static int32_t lwrite(int32_t fd, off64_t offset, int whence, void *ptr, ssize_t
 	return 1;
 }
 
-static void check(int test, const char *message, ...)
-{
-	if (test) {
-		va_list args;
-		va_start(args, message);
-		vfprintf(stderr, message, args);
-		va_end(args);
-		fprintf(stderr, "container\n");
-		exit(EXIT_FAILURE);
-	}
-}
+/*Called once from a region server*/
+static off64_t mount_volume(char *volume_name, int64_t start, int64_t size);
 
-static void add_log_entry(volume_descriptor *volume_desc, void *address, uint32_t length, char type_of_entry);
-static off64_t mount_volume(char *volume_name, int64_t start, int64_t size); /*Called once from a region server*/
-void clean_log_entries(void *volume_desc);
-void mark_block(volume_descriptor *volume_desc, void *block_address, uint32_t length, char free, uint64_t *bit_idx);
+static void clean_log_entries(void *volume_desc);
 
 off64_t mount_volume(char *volume_name, int64_t start, int64_t unused_size)
 {
 	(void)unused_size;
-	off64_t device_size;
+	off64_t device_size = 0;
 
 	MUTEX_LOCK(&VOLUME_LOCK);
 
@@ -174,21 +164,27 @@ off64_t mount_volume(char *volume_name, int64_t start, int64_t unused_size)
 		}
 
 		log_info("Creating virtual address space offset %lld size %ld\n", (long long)start, device_size);
-		MAPPED = (uint64_t)mmap(NULL, device_size, PROT_READ | PROT_WRITE, MAP_SHARED, FD,
-					start); /*mmap the device*/
-		check(MAPPED == (uint64_t)MAP_FAILED, "mmap %s failed: %s", volume_name, strerror(errno));
+		// mmap the device
+		char *addr_space = mmap(NULL, device_size, PROT_READ | PROT_WRITE, MAP_SHARED, FD, start);
+		if (addr_space == MAP_FAILED) {
+			log_fatal("MMAP for device %s reason follows", volume_name);
+			perror("Reason for mmap");
+			exit(EXIT_FAILURE);
+		}
+
+		MAPPED = (uint64_t)addr_space;
 		madvise((void *)MAPPED, device_size, MADV_RANDOM);
 
-		if (MAPPED % sysconf(_SC_PAGE_SIZE) == 0)
-			log_info("address space aligned properly address space starts at %llu\n", (LLU)MAPPED);
-		else {
-			log_fatal("FATAL error Mapped address not aligned correctly mapped: %llu", (LLU)MAPPED);
+		if (MAPPED % sysconf(_SC_PAGE_SIZE) != 0) {
+			log_fatal("Mapped address not aligned correctly mapped: %llu", (LLU)MAPPED);
 			exit(EXIT_FAILURE);
 		}
 	}
+
 	struct superblock *b = (struct superblock *)MAPPED;
 	if (b->magic_number != MAGIC_NUMBER) {
-		log_fatal("This volume %s does not seem to contain a valid instance. Issue mkfs command and retry",
+		log_fatal("This volume %s does not seem to contain a valid instance. Issue "
+			  "mkfs command and retry",
 			  volume_name);
 		exit(EXIT_FAILURE);
 	}
@@ -213,7 +209,6 @@ int32_t volume_init(char *dev_name, int64_t start, int64_t size, int typeOfVolum
 
 	superblock *dev_superblock;
 	pr_system_catalogue sys_catalogue;
-	uint32_t i;
 	int fd = 0;
 	int ret;
 	struct fake_blk_page_range frang;
@@ -255,7 +250,7 @@ int32_t volume_init(char *dev_name, int64_t start, int64_t size, int typeOfVolum
 		 (long long)size, (long long)dev_size_in_blocks);
 
 	/*check if the device is a fake_blk device, maybe add another ioctl for this
-* purpose*/
+purpose*/
 	ret = ioctl(fd, FAKE_BLK_IOC_TEST_CAP);
 	if (ret == 0) {
 		// we should also zero all range from start to size
@@ -286,33 +281,33 @@ int32_t volume_init(char *dev_name, int64_t start, int64_t size, int typeOfVolum
 * each epoch, we are going to update the bitmap that belongs to the older epoch.
 * After a crash failure we are going to
 * restore the most recent bitmap block
-* 1. We are going to partition the device metadata - data
 */
 	bitmap_size_in_blocks = 0;
-	dev_addressed_in_blocks = 0;
 	while (1) {
 		bitmap_size_in_blocks++;
-		dev_addressed_in_blocks = bitmap_size_in_blocks * DATA_PER_BITMAP_BLOCK;
-		if ((1 + FREE_LOG_SIZE + (2 * bitmap_size_in_blocks) + dev_addressed_in_blocks) > dev_size_in_blocks) {
+		dev_addressed_in_blocks = (bitmap_size_in_blocks * BLOCKS_PER_BUDDY_PAIR);
+		if ((1 + FREE_LOG_SIZE_IN_BLOCKS + (2 * bitmap_size_in_blocks) + dev_addressed_in_blocks) >
+		    dev_size_in_blocks) {
 			bitmap_size_in_blocks--;
 			break;
 		}
 	}
-	dev_addressed_in_blocks = bitmap_size_in_blocks * DATA_PER_BITMAP_BLOCK;
+	dev_addressed_in_blocks = bitmap_size_in_blocks * BLOCKS_PER_BUDDY_PAIR;
 	bitmap_size_in_blocks *= 2;
-	unmapped_blocks = dev_size_in_blocks - (1 + FREE_LOG_SIZE + bitmap_size_in_blocks + dev_addressed_in_blocks);
+	unmapped_blocks =
+		dev_size_in_blocks - (1 + FREE_LOG_SIZE_IN_BLOCKS + bitmap_size_in_blocks + dev_addressed_in_blocks);
 
 	if (unmapped_blocks < 0) {
 		log_fatal("negative unallocated space! System will exit");
 		exit(EXIT_FAILURE);
 	}
 
-	offset = start + 4096 + (FREE_LOG_SIZE * 4096);
+	offset = start + DEVICE_BLOCK_SIZE + (FREE_LOG_SIZE_IN_BLOCKS * DEVICE_BLOCK_SIZE);
 	/*set all epochs set to "0"*/
 	memset(buffer, 0x00, sizeof(int64_t));
 	memset(buffer + sizeof(int64_t), 0xFF, DEVICE_BLOCK_SIZE - sizeof(int64_t));
 
-	for (i = 0; i < bitmap_size_in_blocks; i++) {
+	for (uint64_t i = 0; i < bitmap_size_in_blocks; i++) {
 		if (lwrite(fd, (off_t)offset, SEEK_SET, buffer, (size_t)DEVICE_BLOCK_SIZE) == -1) {
 			log_fatal("code = %d,  ERROR = %s\n", errno, strerror(errno));
 			printf("Writing at offset %llu\n", (LLU)offset);
@@ -321,9 +316,10 @@ int32_t volume_init(char *dev_name, int64_t start, int64_t size, int typeOfVolum
 		offset += 4096;
 	}
 
-	//do we need to pad? addresses need to be aligned at SEGMENT_SIZE granularity
-	//reserve the first SEGMENT_SIZE for the initial version of the superindex
-	uint64_t pad = (start + ((1 + FREE_LOG_SIZE + bitmap_size_in_blocks) * DEVICE_BLOCK_SIZE)) % SEGMENT_SIZE;
+	// do we need to pad? addresses need to be aligned at SEGMENT_SIZE granularity
+	// reserve the first SEGMENT_SIZE for the initial version of the superindex
+	uint64_t pad =
+		(start + ((1 + FREE_LOG_SIZE_IN_BLOCKS + bitmap_size_in_blocks) * DEVICE_BLOCK_SIZE)) % SEGMENT_SIZE;
 	pad = SEGMENT_SIZE - pad;
 	log_info("Padding %llu bytes for alignment purposes", (LLU)pad);
 	struct bitmap_bit {
@@ -336,6 +332,7 @@ int32_t volume_init(char *dev_name, int64_t start, int64_t size, int typeOfVolum
 		char b6 : 1;
 		char b7 : 1;
 	};
+
 	struct bitmap_bit *bits = (struct bitmap_bit *)(buffer + sizeof(uint64_t));
 	int total_bitmap_bits = (SEGMENT_SIZE + pad) / DEVICE_BLOCK_SIZE;
 	for (int ii = 0; ii < total_bitmap_bits; ii++) {
@@ -372,22 +369,8 @@ int32_t volume_init(char *dev_name, int64_t start, int64_t size, int typeOfVolum
 		}
 	}
 
-	//int bitmap_bytes = ((SEGMENT_SIZE + pad) / DEVICE_BLOCK_SIZE) / sizeof(uint64_t);
-	//uint32_t bitmap_bits = ((SEGMENT_SIZE + pad) / DEVICE_BLOCK_SIZE) % sizeof(uint64_t);
-	//log_info("Bitmap bits %u", bitmap_bits);
-	//memset(buffer + sizeof(uint64_t), 0x00, bitmap_bytes);
-	//char tmp = 0xFF;
-	//if (bitmap_bits != 0) {
-	//	tmp = (tmp >> bitmap_bits) << bitmap_bits;
-	//	memcpy(buffer + sizeof(uint64_t) + bitmap_bytes, &tmp, sizeof(char));
-	//}
-	//fprintf(stderr,
-	//	"[%s:%s:%d] reserved for SEGMENT_SIZE %d bitmap_bytes "
-	//	"%d and bitmap_bits %d\n",
-	//	__FILE__, __func__, __LINE__, SEGMENT_SIZE, bitmap_bytes, bitmap_bits);
-
 	/*write it now*/
-	offset = start + 4096 + (FREE_LOG_SIZE * 4096);
+	offset = start + 4096 + (FREE_LOG_SIZE_IN_BLOCKS * 4096);
 	if (lwrite(fd, offset, SEEK_SET, buffer, (size_t)DEVICE_BLOCK_SIZE) == -1) {
 		fprintf(stderr, "Function = %s, code = %d,  ERROR = %s\n", __func__, errno, strerror(errno));
 		exit(EXIT_FAILURE);
@@ -403,7 +386,7 @@ int32_t volume_init(char *dev_name, int64_t start, int64_t size, int typeOfVolum
 	offset = start + 4096;
 	memset(buffer, 0x00, DEVICE_BLOCK_SIZE);
 
-	for (i = 0; i < FREE_LOG_SIZE; i++) {
+	for (int i = 0; i < FREE_LOG_SIZE_IN_BLOCKS; i++) {
 		if (lwrite(fd, (off_t)offset, SEEK_SET, buffer, DEVICE_BLOCK_SIZE) == -1) {
 			fprintf(stderr, "Function = %s, code = %d,  ERROR = %s\n", __func__, errno, strerror(errno));
 			return -1;
@@ -413,7 +396,7 @@ int32_t volume_init(char *dev_name, int64_t start, int64_t size, int typeOfVolum
 
 	free(buffer);
 	/*write super index*/
-	offset = start + (uint64_t)DEVICE_BLOCK_SIZE + (uint64_t)(FREE_LOG_SIZE * DEVICE_BLOCK_SIZE) +
+	offset = start + (uint64_t)DEVICE_BLOCK_SIZE + (uint64_t)(FREE_LOG_SIZE_IN_BLOCKS * DEVICE_BLOCK_SIZE) +
 		 (uint64_t)(bitmap_size_in_blocks * DEVICE_BLOCK_SIZE) + pad;
 	if (offset % SEGMENT_SIZE != 0) {
 		log_fatal("FATAL misaligned initial address\n");
@@ -426,12 +409,11 @@ int32_t volume_init(char *dev_name, int64_t start, int64_t size, int typeOfVolum
 	sys_catalogue.last_system_segment = offset;
 	sys_catalogue.offset = 8192;
 
-	for (i = 0; i < NUM_OF_DB_GROUPS; i++)
+	for (int i = 0; i < NUM_OF_DB_GROUPS; i++)
 		sys_catalogue.db_group_index[i] = 0;
 
 	/*zero metadata of system segment*/
-	char *zeroes = malloc(sizeof(segment_header));
-	memset(zeroes, 0x00, sizeof(segment_header));
+	struct segment_header *zeroes = (struct segment_header *)calloc(1, sizeof(segment_header));
 	if (lwrite(fd, (off_t)offset, SEEK_SET, zeroes, sizeof(segment_header)) == -1) {
 		log_fatal("code = %d,  ERROR = %s\n", errno, strerror(errno));
 		return -1;
@@ -465,7 +447,7 @@ int32_t volume_init(char *dev_name, int64_t start, int64_t size, int typeOfVolum
 	printf("\tDevice size in blocks %llu\n", (LLU)dev_size_in_blocks);
 	printf("\tBitmap size in blocks %llu\n", (LLU)bitmap_size_in_blocks);
 	printf("\tData size in blocks %llu\n", (LLU)dev_addressed_in_blocks);
-	printf("\tLog size in blocks %llu\n", (LLU)FREE_LOG_SIZE);
+	printf("\tLog size in blocks %llu\n", (LLU)FREE_LOG_SIZE_IN_BLOCKS);
 	printf("\tUnmapped blocks %llu\n", (LLU)unmapped_blocks);
 	printf("################################\n\n");
 
@@ -483,8 +465,7 @@ void destroy_volume_node(NODE *node)
 	volume_descriptor *volume_desc = (volume_descriptor *)node->data;
 	free(volume_desc->volume_id);
 	free(volume_desc->volume_name);
-	free(volume_desc->allocator_state);
-	free(volume_desc->sync_signal);
+	free(volume_desc->buddies_vector);
 	destroy_list(volume_desc->open_databases);
 	free(volume_desc);
 }
@@ -531,9 +512,456 @@ void volume_close(volume_descriptor *volume_desc)
 #####	2: look        / increase	 ####
 ####	3: look        / do not increase ####
 #############################################*/
-static inline void *next_word(volume_descriptor *volume_desc, unsigned char op_code)
+enum bitmap_buddy_state { LEFT_DIRTY = 0, LEFT_IMMUTABLE = 1, RIGHT_IMMUTABLE = 2, RIGHT_DIRTY = 3 };
+struct bitmap_word {
+	uint64_t *word_addr;
+	uint32_t start_bit;
+	uint32_t end_bit;
+	int buddy_pair;
+	int buddy_id;
+	int word_id;
+};
+
+static int bitmap_choose_buddy(struct volume_descriptor *volume_desc, int buddy_pair)
 {
-	void *next_addr;
+	int i = buddy_pair / BITMAP_BUDDY_PAIRS_PER_CELL;
+	int j = buddy_pair % BITMAP_BUDDY_PAIRS_PER_CELL;
+	int state;
+	switch (j) {
+	case 0:
+		state = volume_desc->buddies_vector->buddy[i].b0;
+		break;
+	case 1:
+		state = volume_desc->buddies_vector->buddy[i].b1;
+		break;
+	case 2:
+		state = volume_desc->buddies_vector->buddy[i].b2;
+		break;
+	case 3:
+		state = volume_desc->buddies_vector->buddy[i].b3;
+		break;
+	default:
+		log_fatal("Unhandled situation j = %d", j);
+		exit(EXIT_FAILURE);
+	}
+
+	switch (state) {
+	case LEFT_IMMUTABLE:
+	case LEFT_DIRTY:
+		return 0;
+	case RIGHT_IMMUTABLE:
+	case RIGHT_DIRTY:
+		return 1;
+	default:
+		log_fatal("Broken state");
+		exit(EXIT_FAILURE);
+	}
+}
+
+static void bitmap_cow_check(struct volume_descriptor *volume_desc, struct bitmap_word *word)
+{
+	int i = word->buddy_pair / BITMAP_BUDDY_PAIRS_PER_CELL;
+	int j = word->buddy_pair % BITMAP_BUDDY_PAIRS_PER_CELL;
+	int state;
+	switch (j) {
+	case 0:
+		state = volume_desc->buddies_vector->buddy[i].b0;
+		break;
+	case 1:
+		state = volume_desc->buddies_vector->buddy[i].b1;
+		break;
+	case 2:
+		state = volume_desc->buddies_vector->buddy[i].b2;
+		break;
+	case 3:
+		state = volume_desc->buddies_vector->buddy[i].b3;
+		break;
+	default:
+		log_fatal("Unhandled situation buddy pair is %d", word->buddy_pair);
+		assert(0);
+		exit(EXIT_FAILURE);
+	}
+
+	struct bitmap_buddy_pair *b_pairs = (struct bitmap_buddy_pair *)volume_desc->bitmap_start;
+	switch (state) {
+	case LEFT_DIRTY: // 00
+		word->buddy_id = 0;
+		word->word_addr = &b_pairs[word->buddy_pair].buddy[word->buddy_id].word[word->word_id];
+		break;
+
+	case LEFT_IMMUTABLE: //"01"-->"11" left block sealed, write right
+		// copy the block and change allocator state
+		memcpy(b_pairs[word->buddy_pair].buddy[1].word, b_pairs[word->buddy_pair].buddy[0].word,
+		       WORDS_PER_BITMAP_BUDDY * sizeof(uint64_t));
+		b_pairs[word->buddy_pair].buddy[1].epoch = volume_desc->mem_catalogue->epoch;
+		// change state
+		switch (j) {
+		case 0:
+			volume_desc->buddies_vector->buddy[i].b0 = RIGHT_DIRTY;
+			break;
+		case 1:
+			volume_desc->buddies_vector->buddy[i].b1 = RIGHT_DIRTY;
+			break;
+		case 2:
+			volume_desc->buddies_vector->buddy[i].b2 = RIGHT_DIRTY;
+			break;
+		case 3:
+			volume_desc->buddies_vector->buddy[i].b3 = RIGHT_DIRTY;
+			break;
+		default:
+			log_fatal("Unhandled state");
+			exit(EXIT_FAILURE);
+		}
+		word->buddy_id = 1;
+		word->word_addr = &b_pairs[word->buddy_pair].buddy[word->buddy_id].word[word->word_id];
+		break;
+
+	case RIGHT_IMMUTABLE: //"10"-->"00" right block sealed, write left
+		// copy the block and change allocator state
+		memcpy(b_pairs[word->buddy_pair].buddy[0].word, b_pairs[word->buddy_pair].buddy[1].word,
+		       WORDS_PER_BITMAP_BUDDY * sizeof(uint64_t));
+		b_pairs[word->buddy_pair].buddy[0].epoch = volume_desc->mem_catalogue->epoch;
+		// change state
+		switch (j) {
+		case 0:
+			volume_desc->buddies_vector->buddy[i].b0 = LEFT_DIRTY;
+			break;
+		case 1:
+			volume_desc->buddies_vector->buddy[i].b1 = LEFT_DIRTY;
+			break;
+		case 2:
+			volume_desc->buddies_vector->buddy[i].b2 = LEFT_DIRTY;
+			break;
+		case 3:
+			volume_desc->buddies_vector->buddy[i].b3 = LEFT_DIRTY;
+			break;
+		default:
+			log_fatal("Unhandled state");
+			exit(EXIT_FAILURE);
+		}
+		word->buddy_id = 0;
+		word->word_addr = &b_pairs[word->buddy_pair].buddy[word->buddy_id].word[word->word_id];
+		break;
+
+	case RIGHT_DIRTY: // 11
+		word->buddy_id = 1;
+		word->word_addr = &b_pairs[word->buddy_pair].buddy[word->buddy_id].word[word->word_id];
+		break;
+	}
+	return;
+}
+
+void bitmap_set_buddies_immutable(struct volume_descriptor *volume_desc)
+{
+	uint32_t j = 0;
+	for (uint32_t i = 0; i < volume_desc->buddies_vector->size;) {
+		int state;
+		int id = j % BITMAP_BUDDY_PAIRS_PER_CELL;
+		switch (id) {
+		case 0:
+			state = volume_desc->buddies_vector->buddy[i].b0;
+			if (state == LEFT_DIRTY)
+				volume_desc->buddies_vector->buddy[i].b0 = LEFT_IMMUTABLE;
+			else if (state == RIGHT_DIRTY)
+				volume_desc->buddies_vector->buddy[i].b0 = RIGHT_IMMUTABLE;
+			break;
+		case 1:
+			state = volume_desc->buddies_vector->buddy[i].b1;
+			if (state == LEFT_DIRTY)
+				volume_desc->buddies_vector->buddy[i].b1 = LEFT_IMMUTABLE;
+			else if (state == RIGHT_DIRTY)
+				volume_desc->buddies_vector->buddy[i].b1 = RIGHT_IMMUTABLE;
+			break;
+		case 2:
+			state = volume_desc->buddies_vector->buddy[i].b2;
+			if (state == LEFT_DIRTY)
+				volume_desc->buddies_vector->buddy[i].b2 = LEFT_IMMUTABLE;
+			else if (state == RIGHT_DIRTY)
+				volume_desc->buddies_vector->buddy[i].b2 = RIGHT_IMMUTABLE;
+			break;
+		case 3:
+			state = volume_desc->buddies_vector->buddy[i].b3;
+			if (state == LEFT_DIRTY)
+				volume_desc->buddies_vector->buddy[i].b3 = LEFT_IMMUTABLE;
+			else if (state == RIGHT_DIRTY)
+				volume_desc->buddies_vector->buddy[i].b3 = RIGHT_IMMUTABLE;
+			++i;
+			break;
+		default:
+			log_fatal("Unhandled state");
+			exit(EXIT_FAILURE);
+		}
+		++j;
+	}
+	return;
+}
+
+static void *bitmap_translate_word_to_addr(struct volume_descriptor *volume_desc, struct bitmap_word *b)
+{
+	if (!b) {
+		log_fatal("error null word!");
+		exit(EXIT_FAILURE);
+	}
+	uint64_t bytes_per_buddy_pair = WORDS_PER_BITMAP_BUDDY * WORD_SIZE_IN_BITS * DEVICE_BLOCK_SIZE;
+	uint64_t bytes_per_word = WORD_SIZE_IN_BITS * DEVICE_BLOCK_SIZE;
+
+	uint64_t dev_offt = b->buddy_pair * bytes_per_buddy_pair;
+	dev_offt += (b->word_id * bytes_per_word);
+	dev_offt += (b->start_bit * DEVICE_BLOCK_SIZE);
+	return volume_desc->bitmap_end + dev_offt;
+}
+
+static void bitmap_mark_block_free(struct volume_descriptor *volume_desc, void *addr)
+{
+	int64_t bits_per_buddy_pair = WORDS_PER_BITMAP_BUDDY * WORD_SIZE_IN_BITS;
+	// distance of addr from bitmap end
+	uint64_t distance_in_bits = (addr - volume_desc->bitmap_end) / DEVICE_BLOCK_SIZE;
+	struct bitmap_word w;
+	w.buddy_pair = distance_in_bits / bits_per_buddy_pair;
+	w.buddy_id = bitmap_choose_buddy(volume_desc, w.buddy_pair);
+	uint32_t bit_in_buddy = distance_in_bits % bits_per_buddy_pair;
+	w.word_id = bit_in_buddy / WORD_SIZE_IN_BITS;
+	uint32_t bit_in_word = bit_in_buddy % WORD_SIZE_IN_BITS;
+
+	struct bitmap_buddy_pair *p = volume_desc->bitmap_start;
+	w.word_addr = &p[w.buddy_pair].buddy[w.buddy_id].word[w.word_id];
+	bitmap_cow_check(volume_desc, &w);
+	struct bitmap_byte {
+		uint8_t b0 : 1;
+		uint8_t b1 : 1;
+		uint8_t b2 : 1;
+		uint8_t b3 : 1;
+		uint8_t b4 : 1;
+		uint8_t b5 : 1;
+		uint8_t b6 : 1;
+		uint8_t b7 : 1;
+	};
+	struct bitmap_byte *my_word = (struct bitmap_byte *)w.word_addr;
+	int m_idx = bit_in_word / 8;
+	int m_bit = bit_in_word % 8;
+	switch (m_bit) {
+	case 0:
+		my_word[m_idx].b0 = 1;
+		break;
+	case 1:
+		my_word[m_idx].b1 = 1;
+		break;
+	case 2:
+		my_word[m_idx].b2 = 1;
+		break;
+	case 3:
+		my_word[m_idx].b3 = 1;
+		break;
+	case 4:
+		my_word[m_idx].b4 = 1;
+		break;
+	case 5:
+		my_word[m_idx].b5 = 1;
+		break;
+	case 6:
+		my_word[m_idx].b6 = 1;
+		break;
+	case 7:
+		my_word[m_idx].b7 = 1;
+		break;
+	}
+	return;
+}
+
+static void bitmap_mark_reserved(struct volume_descriptor *volume_desc, struct bitmap_word *b_word)
+{
+	bitmap_cow_check(volume_desc, b_word);
+	//log_info("Marking b_word reserved buddy pair:%d word id:%d buddy_id:%d "
+	//	 "start_bit %u end bit %u",
+	//	 b_word->buddy_pair, b_word->word_id, b_word->buddy_id, b_word->start_bit, b_word->end_bit);
+
+	struct bitmap_word_byte {
+		uint8_t b0 : 1;
+		uint8_t b1 : 1;
+		uint8_t b2 : 1;
+		uint8_t b3 : 1;
+		uint8_t b4 : 1;
+		uint8_t b5 : 1;
+		uint8_t b6 : 1;
+		uint8_t b7 : 1;
+	};
+	struct bitmap_word_byte *word_b = (struct bitmap_word_byte *)b_word->word_addr;
+	for (uint32_t bit = b_word->start_bit; bit < b_word->end_bit; ++bit) {
+		uint32_t i = bit / 8;
+		uint32_t j = bit % 8;
+		switch (j) {
+		case 0:
+			word_b[i].b0 = 0;
+			break;
+		case 1:
+			word_b[i].b1 = 0;
+			break;
+		case 2:
+			word_b[i].b2 = 0;
+			break;
+		case 3:
+			word_b[i].b3 = 0;
+			break;
+		case 4:
+			word_b[i].b4 = 0;
+			break;
+		case 5:
+			word_b[i].b5 = 0;
+			break;
+		case 6:
+			word_b[i].b6 = 0;
+			break;
+		case 7:
+			word_b[i].b7 = 0;
+			break;
+		}
+	}
+
+	return;
+}
+
+static struct bitmap_word bitmap_get_curr_word(struct volume_descriptor *volume_desc)
+{
+	struct bitmap_word ret = { .buddy_pair = -1, .buddy_id = -1, .word_id = -1, .word_addr = NULL };
+	struct bitmap_position *b_pos = &volume_desc->b_pos;
+	ret.buddy_pair = b_pos->buddy_pair;
+	ret.word_id = b_pos->word_id;
+
+	ret.buddy_id = bitmap_choose_buddy(volume_desc, ret.buddy_pair);
+
+	struct bitmap_buddy_pair *p = (struct bitmap_buddy_pair *)volume_desc->bitmap_start;
+	ret.word_addr = &p[ret.buddy_pair].buddy[ret.buddy_id].word[ret.word_id];
+	return ret;
+}
+
+static struct bitmap_word bitmap_get_next_word(struct volume_descriptor *volume_desc)
+{
+	struct bitmap_word ret = { .buddy_pair = -1, .buddy_id = -1, .word_id = -1, .word_addr = NULL };
+	if (++volume_desc->b_pos.word_id >= (int)WORDS_PER_BITMAP_BUDDY) {
+		// time for next buddy pair
+		int max_buddy_pairs = volume_desc->volume_superblock->bitmap_size_in_blocks / 2;
+		++volume_desc->b_pos.buddy_pair;
+		if (volume_desc->b_pos.buddy_pair >= max_buddy_pairs) {
+			// sorry end of bitmap
+			return ret;
+		} else
+			volume_desc->b_pos.word_id = 0;
+	}
+
+	return bitmap_get_curr_word(volume_desc);
+}
+
+static void bitmap_init_buddies_vector(struct volume_descriptor *volume_desc, int fake_blk)
+{
+	int buddy_pairs = volume_desc->volume_superblock->bitmap_size_in_blocks / 2;
+	int size = buddy_pairs / BITMAP_BUDDY_PAIRS_PER_CELL;
+	if (buddy_pairs % BITMAP_BUDDY_PAIRS_PER_CELL != 0)
+		++size;
+	if (posix_memalign((void **)&volume_desc->buddies_vector, PAGE_SIZE,
+			   sizeof(struct bitmap_buddies_state) + size)) {
+		log_fatal("memalign for buddies vector failed");
+		exit(EXIT_FAILURE);
+	}
+	memset(volume_desc->buddies_vector, 0x00, sizeof(struct bitmap_buddies_state) + size);
+
+	volume_desc->buddies_vector->size = size;
+
+	/*recover bitmap*/
+	struct fake_blk_page_bitmap *fake_ioc = NULL;
+	if (fake_blk)
+		fake_ioc = calloc(1, sizeof(struct fake_blk_page_bitmap));
+
+	struct bitmap_buddy_pair *b_pair = (struct bitmap_buddy_pair *)volume_desc->bitmap_start;
+	uint64_t last_persistent_epoch = volume_desc->dev_catalogue->epoch;
+
+	uint64_t data_offset = (uint64_t)volume_desc->bitmap_end;
+
+	for (int i = 0; i < buddy_pairs; ++i) {
+		int winner = 0;
+		if (b_pair[i].buddy[0].epoch > last_persistent_epoch &&
+		    b_pair[i].buddy[1].epoch > last_persistent_epoch) {
+			log_fatal("Corruption detected both bitmap pairs epoch larger than "
+				  "superblock's epoch");
+			log_fatal("epoch left is %llu epoch right is %llu dev superindex %llu",
+				  b_pair[i].buddy[0].epoch, b_pair[i].buddy[1].epoch, last_persistent_epoch);
+			exit(EXIT_FAILURE);
+		}
+		// to be eligible for winner left has to be smaller or equal to persistent
+		// epoch
+		else if (b_pair[i].buddy[0].epoch >= b_pair[i].buddy[1].epoch &&
+			 b_pair[i].buddy[0].epoch <= last_persistent_epoch)
+			winner = 0; // left wins
+		else if (b_pair[i].buddy[1].epoch >= b_pair[i].buddy[0].epoch &&
+			 b_pair[i].buddy[1].epoch <= last_persistent_epoch)
+			winner = 1; // right wins
+		/*ok we now are sure one of them is smaller then dev superindex, who is it*/
+		else if (b_pair[i].buddy[0].epoch <= last_persistent_epoch)
+			winner = 0;
+		else
+			winner = 1;
+
+		if (fake_blk) {
+			fake_ioc->offset = ((uint64_t)(data_offset) - (uint64_t)MAPPED) / 4096;
+			data_offset += ((4088 * 8) * 4096);
+
+			if (winner == 0) {
+				memcpy((void *)fake_ioc->bpage, (void *)(i + sizeof(int64_t)), 4088);
+			} else {
+				memcpy((void *)fake_ioc->bpage, (void *)(i + DEVICE_BLOCK_SIZE + sizeof(int64_t)),
+				       4088);
+			}
+
+			// FIXME should we check FD??
+			int ret = ioctl(FD, FAKE_BLK_IOC_FLIP_COPY_BITMAP, (void *)fake_ioc);
+			if (ret != 0) {
+				printf("%s ERROR! ioctl(FAKE_BLK_IOC_COPY_PAGE) failed!\n%s", "\033[0;31m", "\033[0m");
+				exit(EXIT_FAILURE);
+			}
+		}
+		uint8_t state;
+		if (winner == 0)
+			state = LEFT_IMMUTABLE;
+		else
+			state = RIGHT_IMMUTABLE;
+		int idx = i / BITMAP_BUDDY_PAIRS_PER_CELL;
+		int j = i % BITMAP_BUDDY_PAIRS_PER_CELL;
+		switch (j) {
+		case 0:
+			volume_desc->buddies_vector->buddy[idx].b0 = state;
+			break;
+		case 1:
+			volume_desc->buddies_vector->buddy[idx].b1 = state;
+			break;
+		case 2:
+			volume_desc->buddies_vector->buddy[idx].b2 = state;
+			break;
+		case 3:
+			volume_desc->buddies_vector->buddy[idx].b3 = state;
+			break;
+		default:
+			log_fatal("Unhandled state");
+			exit(EXIT_FAILURE);
+		}
+	}
+
+	if (fake_blk)
+		free(fake_ioc);
+
+	return;
+}
+
+static void bitmap_reset_pos(struct volume_descriptor *volume_desc)
+{
+	volume_desc->b_pos.buddy_pair = 0;
+	volume_desc->b_pos.word_id = 0;
+	log_info("Initialized bitmap pos buddy %d", volume_desc->b_pos.buddy_pair);
+	return;
+}
+
+#if 0
+static inline void *next_word(struct volume_descriptor *volume_desc, enum bitmap_op_code op_code)
+{
+	char *next_word;
 	int64_t pair;
 	int64_t allocator_pos;
 	int64_t allocator_offset;
@@ -541,12 +969,7 @@ static inline void *next_word(volume_descriptor *volume_desc, unsigned char op_c
 	unsigned char state;
 
 	next_addr = volume_desc->latest_addr;
-#ifdef DEBUG_ALLOCATOR
-	printf("[%s:%s:%d] next_word: latest allocated addr: %llu bitmap start %llu "
-	       "bitmap end %llu\n",
-	       __FILE__, __func__, __LINE__, (LLU)next_addr, (LLU)volume_desc->bitmap_start,
-	       (LLU)volume_desc->bitmap_end);
-#endif
+
 	if (op_code == 0 || op_code == 2)
 		next_addr += 8; /*fetch next word for this codes*/
 	/*check to see if we reached the end of the volume*/
@@ -624,6 +1047,7 @@ static inline void *next_word(volume_descriptor *volume_desc, unsigned char op_c
 	volume_desc->latest_addr = (void *)((uint64_t)next_addr + (uint64_t)volume_desc->bitmap_start);
 	return volume_desc->latest_addr;
 }
+#endif
 
 void set_priority(uint64_t pageno, char allocation_code, uint64_t num_bytes)
 {
@@ -695,314 +1119,224 @@ void set_priority(uint64_t pageno, char allocation_code, uint64_t num_bytes)
 	}
 }
 
-struct allocator_bitmap_buddies {
-	uint64_t l_epoch;
-	uint64_t l_bitmap[511];
-	uint64_t r_epoch;
-	uint64_t r_bitmap[511];
-};
+static uint32_t bitmap_check_first_n_bits_free(struct bitmap_word *b_word, uint32_t length_bits, uint32_t suffix_bits)
+{
+	uint64_t mask = 0xFFFFFFFFFFFFFFFF;
+	int actual_bits;
+	if (length_bits - suffix_bits > WORD_SIZE_IN_BITS) {
+		actual_bits = WORD_SIZE_IN_BITS;
+	} else {
+		actual_bits = length_bits - suffix_bits;
+		uint32_t diff = WORD_SIZE_IN_BITS - actual_bits;
+		if (diff < WORD_SIZE_IN_BITS)
+			mask = mask >> diff;
+		else {
+			log_fatal("Wrong sliding number!");
+			exit(EXIT_FAILURE);
+		}
+	}
+	if (mask == (mask & *b_word->word_addr)) {
+		b_word->start_bit = 0;
+		b_word->end_bit = actual_bits;
+		//log_info("Found First %u bits of word %d in buddy %d", actual_bits, b_word->word_id,
+		//	 b_word->buddy_pair);
+		return actual_bits;
+	} else {
+		//log_info("Not Found First %u bits of word %d in buddy %d", actual_bits, b_word->word_id,
+		//	 b_word->buddy_pair);
+		return 0;
+	}
+}
 
-void *allocate(void *_volume_desc, uint64_t num_bytes, int unused, char allocation_code)
+static uint32_t bitmap_find_nbits_in_word(struct bitmap_word *b_word, uint64_t *round, uint32_t *num_rounds,
+					  uint32_t length_bits)
+{
+	uint32_t actual_bits;
+	if (length_bits > WORD_SIZE_IN_BITS)
+		actual_bits = WORD_SIZE_IN_BITS;
+	else
+		actual_bits = length_bits;
+
+	//log_info("Checking if word %u contains bits %u", b_word->word_id, actual_bits);
+
+	uint32_t m_rounds;
+	//calculare upper integral part of log2
+	double r = log2(actual_bits);
+	m_rounds = (uint64_t)r;
+	//check if we have decimal points
+	if (floor(r) != r)
+		++m_rounds;
+	assert(m_rounds + 1 < *num_rounds);
+	*num_rounds = m_rounds;
+	//log_info("Num rounds are %u", *num_rounds);
+	int shift_size = 1;
+
+	//Our guard
+
+	round[0] = *b_word->word_addr;
+	for (uint32_t i = 0; i < *num_rounds; i++) {
+		if (i == 0)
+			shift_size = 1;
+		else if (i == *num_rounds - 1)
+			shift_size = actual_bits - (shift_size * 2);
+		else
+			shift_size *= 2;
+		//log_info("Shift size %u", shift_size);
+		uint64_t c = round[i] << shift_size;
+		round[i + 1] = round[i] & c;
+	}
+
+	//did we find size or WORD_SIZE bits?
+	if (round[*num_rounds] != 0) {
+		b_word->end_bit = ffsl(round[*num_rounds]);
+		b_word->start_bit = b_word->end_bit - actual_bits;
+		//log_info("Yes it does! end bit is %u round is %llu", b_word->end_bit, round[*num_rounds]);
+
+		return actual_bits;
+	} else {
+		return 0;
+	}
+}
+
+static uint32_t bitmap_find_suffix(struct bitmap_word *b_word, uint64_t *rounds, int num_rounds)
+{
+	uint64_t mask = 0x8000000000000000;
+	uint32_t size_bits = 0;
+	int L = num_rounds;
+	uint64_t b = 1;
+	//log_info("Suffix search: num rounds are %d", num_rounds);
+	do {
+		if (mask & (rounds[L] << size_bits)) {
+			size_bits += (b << L);
+			//log_info("Suffix now is %u L = %d rounds %llu", size_bits, L, rounds[L]);
+		}
+		--L;
+	} while (L >= 0);
+	if (size_bits) {
+		b_word->start_bit = WORD_SIZE_IN_BITS - size_bits;
+		b_word->end_bit = WORD_SIZE_IN_BITS;
+		//log_info("Suffix search size found is %u", size_bits);
+		return size_bits;
+	} else {
+		//log_info("Sorry no suffix found");
+		return 0;
+	}
+}
+
+void *allocate(struct volume_descriptor *volume_desc, uint64_t num_bytes, int unused, char allocation_code)
 {
 	(void)unused;
 	(void)allocation_code;
-	assert(num_bytes == SEGMENT_SIZE);
+	//assert(num_bytes == SEGMENT_SIZE);
+	if (num_bytes == 0)
+		return NULL;
 
-	volume_descriptor *volume_desc = (volume_descriptor *)_volume_desc;
-	int64_t round[7];
 	void *base_addr;
-	void *src;
-	void *dest;
-	int64_t b = 1;
-	uint64_t start_bit_offset = 0;
-	uint64_t end_bit_offset = 64;
-	uint64_t suffix_size = 0;
-	uint64_t mask;
-	/*convert number of bytes in corresponding BLKSIZE blocks needed*/
-	int64_t size = num_bytes / DEVICE_BLOCK_SIZE;
 
-	uint64_t *words = NULL;
+	uint64_t length_bits = num_bytes / DEVICE_BLOCK_SIZE;
+
+	struct bitmap_word *b_words = NULL;
 	/*how many words will i need?*/
-	if (size == 1) {
-		words = (uint64_t *)malloc(sizeof(uint64_t));
-	} else if (size > 1 && size < 64) {
-		words = (uint64_t *)malloc(sizeof(uint64_t) * 2);
-	} else {
-		uint32_t alloc_size = ((size / 64) * sizeof(uint64_t)) + (2 * sizeof(uint64_t));
-		words = (uint64_t *)malloc(alloc_size);
-	}
-	if (words == NULL) {
+	uint32_t alloc_size;
+	if (length_bits == 1)
+		alloc_size = sizeof(struct bitmap_word);
+	else if (length_bits > 1 && length_bits < 64)
+		alloc_size = sizeof(struct bitmap_word) * 2;
+	else
+		alloc_size = ((length_bits / WORD_SIZE_IN_BITS) * sizeof(struct bitmap_word)) +
+			     (2 * sizeof(struct bitmap_word));
+	b_words = (struct bitmap_word *)malloc(alloc_size);
+
+	if (b_words == NULL) {
 		log_fatal("Malloc failed out of memory");
 		exit(EXIT_FAILURE);
 	}
-	void *word_address; /*current word we are searching*/
-	int32_t i = 0;
-	int32_t shift_bits = 0;
-	int32_t num_rounds = 0;
-	int32_t idx = 0;
-	int32_t pos;
-	int32_t pos_bit;
-	unsigned char state;
-	int32_t wrap_around = 0;
 
-	// pthread_mutex_lock(&(volume_desc->allocator_lock));
-	word_address = next_word(volume_desc, 3); /*finds next  bitmap word address*/
-	while (1) {
-		if ((uint64_t)word_address == (uint64_t)0xFFFFFFFFFFFFFFFF) {
-			/*reached end of bitmap*/
+	int32_t wrap_around = 0;
+	int idx = -1;
+	struct bitmap_word b_word = bitmap_get_curr_word(volume_desc);
+	uint64_t suffix_bits = 0;
+
+	while (suffix_bits < length_bits) {
+		if (b_word.word_addr == NULL) {
+			// reached end of bitmap
 			if (wrap_around == MAX_ALLOCATION_TRIES) {
-				printf("[%s:%s:%d] device out of space allocation request size was "
-				       "%llu max_tries %d\n",
-				       __FILE__, __func__, __LINE__, (LLU)num_bytes, MAX_ALLOCATION_TRIES);
-				// pthread_mutex_unlock(&(volume_desc->allocator_lock));
-				raise(SIGINT);
+				log_warn("Volume %s out of space allocation request size was "
+					 "%llu max_tries %d\n",
+					 volume_desc->volume_name, num_bytes, MAX_ALLOCATION_TRIES);
+				bitmap_reset_pos(volume_desc);
+				free(b_words);
 				return NULL;
 			} else {
+				++wrap_around;
+				if (volume_desc->max_suffix < suffix_bits) /*update max_suffix */
+					volume_desc->max_suffix = suffix_bits;
+				suffix_bits = 0; /*contiguous bytes just broke :-( */
+				idx = -1; /*reset _counters*/
+				// reset bitmap pos
 				log_warn("\n*****\nEnd Of Bitmap, wrap around\n*****\n");
-				wrap_around++;
-				if (volume_desc->max_suffix < suffix_size) /*update max_suffix */
-					volume_desc->max_suffix = suffix_size;
-				suffix_size = 0; /*contiguous bytes just broke :-( */
-				idx = 0; /*reset _counters*/
-				start_bit_offset = 0;
-				end_bit_offset = 64;
-				volume_desc->latest_addr = volume_desc->bitmap_start;
-				word_address = next_word(volume_desc, 3);
+				bitmap_reset_pos(volume_desc);
+				b_word = bitmap_get_curr_word(volume_desc);
+				continue;
 			}
-		}
-		if (*(uint64_t *)word_address == 0) {
+		} else if (*b_word.word_addr == 0) {
 			/*update max_suffix*/
-			if (volume_desc->max_suffix < suffix_size)
-				volume_desc->max_suffix = suffix_size;
-			suffix_size = 0; /*contiguous bytes just broke :-(*/
-			idx = 0; /*reset _counters*/
-			start_bit_offset = 0;
-			end_bit_offset = 64;
-			word_address = next_word(volume_desc, 0);
+			if (volume_desc->max_suffix < suffix_bits)
+				volume_desc->max_suffix = suffix_bits;
+			// contiguous bytes just broke :-(
+			suffix_bits = 0;
+			// reset _counters
+			idx = -1;
+			b_word = bitmap_get_next_word(volume_desc);
 			continue;
 		}
-		((size - suffix_size) < WORD_SIZE) ? (mask = 0xFFFFFFFFFFFFFFFF >> (WORD_SIZE - (size - suffix_size))) :
-							   (mask = 0xFFFFFFFFFFFFFFFF);
-#ifdef DEBUG_ALLOCATOR
-		log_warn("Mask is %llu word is %llu suffix is %llu\n", (LLU)mask, (LLU) * (uint64_t *)(word_address),
-			 suffix_size);
-#endif
-		/*Are the first high bits of word free*/
-		if (mask == (mask & *(uint64_t *)word_address)) {
-			if ((size - suffix_size) > WORD_SIZE) {
-				suffix_size += WORD_SIZE;
-				/*hit for this word addr, mark it */
-				words[idx] = (uint64_t)word_address;
-				idx++;
-#ifdef DEBUG_ALLOCATOR
-				printf("Found %lld first high bits need more %lld \n", (long long int)suffix_size,
-				       (long long int)size - suffix_size);
-#endif
-				word_address = next_word(volume_desc, 0);
-				continue;
-			} else {
-#ifdef DEBUG_ALLOCATOR
-				printf("Success found final %llu bits\n", (LLU)size - suffix_size);
-#endif
-				words[idx] = (uint64_t)word_address;
-				end_bit_offset = size - suffix_size;
-				idx++;
+
+		/*Are the first bits of word free*/
+		uint32_t bits_found = bitmap_check_first_n_bits_free(&b_word, length_bits, suffix_bits);
+
+		if (bits_found) {
+			++idx;
+			b_words[idx] = b_word;
+			suffix_bits += bits_found;
+			if (suffix_bits == length_bits) {
+				//we are done here
 				break;
+			} else {
+				b_word = bitmap_get_next_word(volume_desc);
+				continue;
 			}
 		} else {
-			// ok, first high bits not 1 or we need more. Try to find size bits or
-			// the largest suffix
-			if (volume_desc->max_suffix < suffix_size)
-				volume_desc->max_suffix = suffix_size;
-			/*contiguous bytes just broke :-(*/
-			suffix_size = 0;
-			idx = 0; /*reset _counters*/
-			start_bit_offset = 0;
-			end_bit_offset = 64;
-			(size <= WORD_SIZE) ? (num_rounds = log2(size)) : (num_rounds = log2(WORD_SIZE));
-			round[0] = *(uint64_t *)word_address;
-			for (i = 0; i < num_rounds; i++) {
-				if ((2 * (b << i) - size) <= 0)
-					shift_bits = b << i;
-				else
-					shift_bits = size - (b << i);
-
-				round[i + 1] = round[i] & (round[i] << shift_bits);
-#ifdef DEBUG_ALLOCATOR
-				printf("round[] = %llu\n", (LLU)round[i + 1]);
-				printf("Shifting bits %d\n", shift_bits);
-#endif
-			}
-/*did we find size or WORD_SIZE bits?*/
-#ifdef DEBUG_ALLOCATOR
-			printf("#### round[%d] = %llu####\n", i, (LLU)round[i]);
-#endif
-			if (round[i] != 0x0000000000000000) {
-				end_bit_offset = ffsl(round[i]);
-				start_bit_offset = end_bit_offset - size;
-				words[idx] = (uint64_t)word_address;
-				idx++;
-#ifdef DEBUG_ALLOCATOR
-				printf("######findpairs round[%d] = %llu offset = %llu bit_offset "
-				       "%llu######\n",
-				       i, (LLU)round[i], (LLU)word_address, (LLU)start_bit_offset);
-#endif
+			// ok, first high bits not 1
+			idx = -1;
+			uint64_t rounds[LOG_WORD_SIZE_IN_BITS * 2];
+			uint32_t round_size = LOG_WORD_SIZE_IN_BITS * 2;
+			bits_found = bitmap_find_nbits_in_word(&b_word, rounds, &round_size, length_bits);
+			if (bits_found == length_bits) {
+				++idx;
+				b_words[idx] = b_word;
 				break;
-			} else /*requested size not found in current word find the largest
-suffix*/
-			{
-				for (i = num_rounds; i >= 0; i--) {
-					if (highest_bit_mask & (round[i] << suffix_size)) {
-#ifdef DEBUG_ALLOCATOR
-						printf("####suffix hit  i = %d adding %d\n", i, b << i);
-#endif
-						suffix_size += (b << i);
-					}
-				}
-				if (suffix_size > 0) {
-					words[idx] = (uint64_t)word_address;
-					start_bit_offset = 64 - suffix_size;
-					idx++;
-				}
 			}
-		}
-		word_address = next_word(volume_desc, 0); /*finds next  bitmap word address */
-	}
-	/*mark the bitmap now, we have surely find something */
-	for (i = 0; i < idx; i++) {
-/*look up block state */
-#ifdef DEBUG_ALLOCATOR
-		printf("DEBUG contents of words[%d] = %llu word addr %llu \n", i, (LLU) * (uint64_t *)words[i],
-		       (LLU)words[i]);
-		printf("\twords[%d] = %llu\n", i, words[i] - (LLU)volume_desc->bitmap_start);
-#endif
-		b = (words[i] - (uint64_t)volume_desc->bitmap_start) / 8192;
-		pos = b / 4;
-		pos_bit = (b % 4) * 2;
-		state = (*(volume_desc->allocator_state + pos) >> pos_bit) << 6;
-#ifdef DEBUG_ALLOCATOR
-		printf("ALLOCATE: state pos = %d state bit = %d\n", pos, pos_bit);
-#endif
-		switch (state) {
-		case 0: /*"00"*/
-#ifdef DEBUG_ALLOCATOR
-			printf("ALLOCATE: Marking bitmap 00 check\n");
-#endif
-			if ((words[i] - (uint64_t)volume_desc->bitmap_start) % 8192 > 4096)
-				words[i] -= 4096;
-			break;
-		case 192: /*"11"*/
-#ifdef DEBUG_ALLOCATOR
-			printf("ALLOCATE: Marking bitmap 11 state nothing to do\n");
-#endif
-			if ((words[i] - (uint64_t)volume_desc->bitmap_start) % 8192 < 4096)
-				words[i] += 4096;
-			break;
-		case 128: /*"10"-->"00" right block sealed, write left */
-#ifdef DEBUG_ALLOCATOR
-			printf("ALLOCATE: Marking bitmap 10 --> 00 state word addr initially = "
-			       "%llu\n",
-			       (LLU)words[i]);
-#endif
-			/*copy the block and change allocator state*/
-			src = (void *)words[i] - (words[i] % 4096);
-			dest = src - 4096;
-			memcpy(dest, src, 4096);
-			memcpy(dest, &(volume_desc->mem_catalogue->epoch), sizeof(int64_t));
-			*(volume_desc->allocator_state + pos) &=
-				~(1 << (pos_bit + 1)); /*finally change status from "10" to "00"*/
-			*(volume_desc->sync_signal + pos) |= (1 << pos_bit); /*change sync signal from 00 to 01*/
-			words[i] -= 4096;
-#ifdef DEBUG_ALLOCATOR
-			printf("ALLOCATE: Marking bitmap 10 --> 00 state word addr finally = %llu\n", (LLU)words[i]);
-#endif
-			break;
-		case 64: /*"01" left block sealed, write right */
-#ifdef DEBUG_ALLOCATOR
-			printf("ALLOCATE: Marking bitmap 01 --> 11 state word addr initially = "
-			       "%llu\n",
-			       (LLU)words[i]);
-#endif
-			src = (void *)(words[i] - (words[i] % 4096));
-			dest = src + 4096;
-			memcpy(dest, src, 4096);
-			memcpy(dest, &(volume_desc->mem_catalogue->epoch), sizeof(int64_t));
-			*(volume_desc->allocator_state + pos) |=
-				(1 << (pos_bit + 1)); /*finally change status from "01" to "11"*/
-			*(volume_desc->sync_signal + pos) |= (1 << pos_bit); /*change sync signal from 00 to 01*/
-			words[i] += 4096;
-#ifdef DEBUG_ALLOCATOR
-			printf("Marking bitmap 01 --> 11 state word addr finally = %llu\n", (LLU)words[i]);
-#endif
-			break;
-
-		default:
-			printf("FATAL error at allocate, invalid state %c\n", state);
-			exit(0);
-			break;
-		}
-#ifdef DEBUG_ALLOCATOR
-		log_info("start_bit_offset = %d end_bit_offset = %d idx = %d\n", start_bit_offset, end_bit_offset, idx);
-#endif
-		if (i == 0) {
-			mask = ~((0xFFFFFFFFFFFFFFFF >> start_bit_offset) << start_bit_offset);
-#ifdef DEBUG_ALLOCATOR
-			printf("ALLOCATE: 1. mask now = %llu\n", (LLU)mask);
-#endif
-		}
-		if (i == idx - 1) {
-			if (end_bit_offset < 64) {
-				if (idx > 1) {
-					b = (0xFFFFFFFFFFFFFFFF >> end_bit_offset) << end_bit_offset;
-					mask = b;
-				} else {
-					b = (0xFFFFFFFFFFFFFFFF >> end_bit_offset) << end_bit_offset;
-					mask |= b;
-				}
-			} else {
-				b = 0x0000000000000000;
-				mask |= b;
+			bits_found = bitmap_find_suffix(&b_word, rounds, round_size);
+			if (bits_found > 0) {
+				++idx;
+				b_words[idx] = b_word;
+				suffix_bits += bits_found;
 			}
+			b_word = bitmap_get_next_word(volume_desc);
 		}
-		// fix for large allocations :-)
-		else
-			mask = 0x0000000000000000;
-#ifdef DEBUG_ALLOCATOR
-		printf("ALLOCATE: 2. mask now = %llu B is %llu\n", (LLU)mask, (LLU)b);
-		printf("ALLOCATE: Mask is %llu bitmap_word is %llu loop %d\n", (LLU)mask,
-		       (LLU) * (uint64_t *)(words[i]), i);
-#endif
-		*(uint64_t *)words[i] &= mask; // fix
 	}
-/*finally, let's return the address */
-#ifdef DEBUG_ALLOCATOR
-	printf("Words[0] addr = %llu\n", (LLU)words[0]);
-#endif
-	word_address = (void *)(words[0] - (uint64_t)volume_desc->bitmap_start);
-	base_addr = volume_desc->bitmap_end + (((uint64_t)word_address / 8192) * (32704 * DEVICE_BLOCK_SIZE));
+	// mark the bitmap now, we have surely find something
+	for (int i = 0; i <= idx; i++)
+		bitmap_mark_reserved(volume_desc, &b_words[i]);
 
-	if ((uint64_t)word_address % 8192 < 4096) {
-		/*left buddy */
-		base_addr += (((uint64_t)word_address % 8192) - 8) * (8 * DEVICE_BLOCK_SIZE);
-	} else {
-		/*right_buddy*/
-		base_addr += ((((uint64_t)word_address % 8192) - 8) - 4096) * (8 * DEVICE_BLOCK_SIZE);
-	}
-	base_addr += (uint64_t)(start_bit_offset * DEVICE_BLOCK_SIZE);
-
-	free(words);
-	// pthread_mutex_unlock(&(volume_desc->allocator_lock));
+	base_addr = bitmap_translate_word_to_addr(volume_desc, &b_words[0]);
+	free(b_words);
 	return (void *)base_addr;
 }
 
 void allocator_init(volume_descriptor *volume_desc)
 {
 	uint64_t i;
-	void *addr;
-
-	int32_t inc = 2 * DEVICE_BLOCK_SIZE;
-	uint64_t page_offset = 0;
-	struct fake_blk_page_bitmap *fake_ioc = NULL;
 	int fake_blk = 0;
 	int ret;
 
@@ -1036,16 +1370,17 @@ void allocator_init(volume_descriptor *volume_desc)
 		 (LLU)volume_desc->volume_superblock->system_catalogue);
 
 	volume_desc->bitmap_start =
-		(void *)volume_desc->start_addr + DEVICE_BLOCK_SIZE + (FREE_LOG_SIZE * DEVICE_BLOCK_SIZE);
+		(void *)volume_desc->start_addr + DEVICE_BLOCK_SIZE + (FREE_LOG_SIZE_IN_BLOCKS * DEVICE_BLOCK_SIZE);
 	volume_desc->bitmap_end =
 		volume_desc->bitmap_start + (volume_desc->volume_superblock->bitmap_size_in_blocks * DEVICE_BLOCK_SIZE);
-	volume_desc->latest_addr = volume_desc->bitmap_start; /*changed!*/
+	bitmap_reset_pos(volume_desc);
+	// volume_desc->latest_addr = volume_desc->bitmap_start;
 	/*calculate superindex addr and load it to separate memory address space*/
 	volume_desc->dev_catalogue =
 		(pr_system_catalogue *)(MAPPED + (uint64_t)(volume_desc->volume_superblock->system_catalogue));
 
-	//create a temporary location in memory for soft_superindex and release it at
-	//the end of allocator_init
+	// create a temporary location in memory for soft_superindex and release it at
+	// the end of allocator_init
 	if (posix_memalign((void *)&(volume_desc->mem_catalogue), DEVICE_BLOCK_SIZE, sizeof(pr_system_catalogue)) !=
 	    0) {
 		perror("memalign failed\n");
@@ -1084,87 +1419,6 @@ void allocator_init(volume_descriptor *volume_desc)
 		volume_desc->allocator_size += (8 - (volume_desc->allocator_size % 8));
 		log_info("Adjusting bitmap pairs state vector to %d", volume_desc->allocator_size);
 	}
-	log_info("Allocator state is %u", volume_desc->allocator_size);
-	volume_desc->allocator_state = (unsigned char *)calloc(1, volume_desc->allocator_size);
-	volume_desc->sync_signal = (unsigned char *)calloc(1, volume_desc->allocator_size);
-
-	fake_ioc = malloc(sizeof(struct fake_blk_page_bitmap));
-
-	uint64_t data_offset = (uint64_t)volume_desc->bitmap_end;
-
-	int offset = 0;
-	/*iterate over metadata blocks to fill the cache state */
-	for (i = (uint64_t)volume_desc->bitmap_start, page_offset = 0; i < (uint64_t)volume_desc->bitmap_end;
-	     i += inc, page_offset += 4088) {
-		uint64_t epoch_l, epoch_r;
-		addr = (void *)i;
-		epoch_l = *(uint64_t *)addr;
-		addr = (void *)i + DEVICE_BLOCK_SIZE;
-		epoch_r = *(uint64_t *)addr;
-#ifdef DEBUG_ALLOCATOR
-		log_info("epoch left is %llu epoch right is %llu", (LLU)epoch_l, (LLU)epoch_r);
-#endif
-		int32_t winner = 0;
-		if (epoch_l > volume_desc->dev_catalogue->epoch && epoch_r > volume_desc->dev_catalogue->epoch) {
-			log_fatal("Corruption detected both bitmap pairs epoch larger than "
-				  "superblock epoch");
-			log_fatal("epoch left is %llu epoch right is %llu dev superindex %llu", (LLU)epoch_l,
-				  (LLU)epoch_r, (LLU)volume_desc->dev_catalogue->epoch);
-			exit(EXIT_FAILURE);
-		}
-		//to be eligible for winner left has to be smaller or equal to persistent
-		//epoch
-		else if ((epoch_l >= epoch_r) && (epoch_l <= volume_desc->dev_catalogue->epoch))
-			winner = 0; /*left wins */
-		//to be eligible for winner right has to be smaller or equal to persistent
-		//epoch
-		else if ((epoch_r >= epoch_l) && (epoch_r <= volume_desc->dev_catalogue->epoch))
-			winner = 1; /*right wins */
-		/*ok we now are sure one of them is smaller then dev superindex, who is it*/
-		else if (epoch_l <= volume_desc->dev_catalogue->epoch)
-			winner = 0;
-		else
-			winner = 1;
-
-		if (fake_blk) {
-			fake_ioc->offset = ((uint64_t)(data_offset) - (uint64_t)MAPPED) / 4096;
-			data_offset += ((4088 * 8) * 4096);
-
-			if (winner == 0) {
-				memcpy((void *)fake_ioc->bpage, (void *)(i + sizeof(int64_t)), 4088);
-			} else {
-				memcpy((void *)fake_ioc->bpage, (void *)(i + DEVICE_BLOCK_SIZE + sizeof(int64_t)),
-				       4088);
-			}
-
-			// FIXME should we check FD??
-			ret = ioctl(FD, FAKE_BLK_IOC_FLIP_COPY_BITMAP, (void *)fake_ioc);
-			if (ret != 0) {
-				printf("%s ERROR! ioctl(FAKE_BLK_IOC_COPY_PAGE) failed!\n%s", "\033[0;31m", "\033[0m");
-				exit(EXIT_FAILURE);
-			}
-		}
-
-		if (winner == 0) {
-			/*aka 01 read from left write to right */
-			//*(volume_desc->allocator_state + (offset / 4)) += 1 << ((offset % 4) * 2);
-			volume_desc->allocator_state[offset / 4] += (1 << ((offset % 4) * 2));
-#ifdef DEBUG_ALLOCATOR
-			printf("left wins: offset %d, position %d, bit %d , added number %d\n", offset, offset / 4,
-			       offset % 4, 1 << (((offset % 4) * 2) + 1));
-#endif
-		} else {
-			/*aka 10 read from right write to left */
-			//*(volume_desc->allocator_state + (offset / 4)) += 1 << (((offset % 4) * 2) + 1);
-			volume_desc->allocator_state[offset / 4] += (1 << (((offset % 4) * 2) + 1));
-#ifdef DEBUG_ALLOCATOR
-			printf("right wins: offset %d, position %d, bit %d , added number %d\n", offset, offset / 4,
-			       offset % 4, 1 << ((offset % 4) * 2));
-#endif
-		}
-		offset++;
-	}
-	free(fake_ioc);
 
 	if (MUTEX_INIT(&volume_desc->mutex, NULL) != 0) {
 		log_fatal("ALLOCATOR_INIT: mutex init failed");
@@ -1176,12 +1430,14 @@ void allocator_init(volume_descriptor *volume_desc)
 		exit(EXIT_FAILURE);
 	}
 
+	bitmap_init_buddies_vector(volume_desc, fake_blk);
+
 	if (pthread_create(&volume_desc->log_cleaner, NULL, (void *)clean_log_entries, volume_desc) == -1) {
 		fprintf(stderr, "FATAL Error starting cleaner system exiting\n");
 		exit(EXIT_FAILURE);
 	}
 
-	if (MUTEX_INIT(&volume_desc->FREE_LOG_LOCK, NULL) != 0) {
+	if (MUTEX_INIT(&volume_desc->free_log_lock, NULL) != 0) {
 		log_fatal("FREE_LOCK init failed");
 		exit(EXIT_FAILURE);
 	}
@@ -1189,7 +1445,7 @@ void allocator_init(volume_descriptor *volume_desc)
 	// void * tmp = (superindex *) allocate(volume_desc, SUPERINDEX_SIZE, -1,
 	// NEW_SUPERINDEX);
 
-	void *tmp = get_space_for_system(volume_desc, sizeof(pr_system_catalogue));
+	void *tmp = get_space_for_system(volume_desc, sizeof(pr_system_catalogue), 1);
 	log_info("segment is at %llu tmp is %llu MAPPED %llu", (LLU)volume_desc->mem_catalogue->first_system_segment,
 		 (LLU)tmp, (LLU)MAPPED);
 	memcpy(tmp, (volume_desc->mem_catalogue), sizeof(pr_system_catalogue));
@@ -1198,7 +1454,7 @@ void allocator_init(volume_descriptor *volume_desc)
 	volume_desc->collisions = 0;
 	volume_desc->hits = 0;
 	volume_desc->free_ops = 0;
-	volume_desc->log_size = FREE_LOG_SIZE * 4096;
+	volume_desc->log_size = FREE_LOG_SIZE_IN_BLOCKS * 4096;
 	return;
 }
 
@@ -1209,86 +1465,67 @@ uint64_t get_timestamp(void)
 	return tv.tv_sec * (uint64_t)1000000 + tv.tv_usec;
 }
 
-static void add_log_entry(volume_descriptor *volume_desc, void *address, uint32_t length, char type_of_entry)
+struct free_op_entry {
+	uint64_t epoch;
+	uint64_t dev_offt;
+	uint64_t length;
+	uint64_t future_extensions;
+};
+
+static void add_log_entry(volume_descriptor *volume_desc, void *address, uint32_t length)
 {
-	void *addr;
-	pthread_mutex_t *lock;
-	uint64_t *log_position;
-	uint64_t *log_last_free;
-	uint64_t log_starting_addr;
-	uint32_t SIZE;
+	uint64_t free_log_size = FREE_LOG_SIZE_IN_BLOCKS * DEVICE_BLOCK_SIZE;
+	uint64_t free_log_offt = sizeof(struct superblock);
 
-	if (type_of_entry == FREE_BLOCK) {
-		lock = &(volume_desc->FREE_LOG_LOCK);
-		log_position = &(volume_desc->mem_catalogue->free_log_position);
-		log_last_free = &(volume_desc->mem_catalogue->free_log_last_free);
-		SIZE = FREE_LOG_SIZE;
-		log_starting_addr = (uint64_t)volume_desc->start_addr + 4096; /*starting addr of the log*/
-	} else {
-		log_warn("CAUTION unknown entry in __add_log_entry");
-		return;
-	}
-// log_info("log pos %llu log_last_free %llu",
-// volume_desc->mem_catalogue->free_log_position,
-//	 volume_desc->mem_catalogue->free_log_last_free);
-#ifdef DEBUG_ALLOCATOR
 	if (((uint64_t)address < (uint64_t)volume_desc->bitmap_end)) {
-		printf("%s: FATAL address inside bitmap range? block address %llu "
-		       "bitmap_end %llu, stack trace follows\n",
-		       __func__, (LLU)address, (LLU)volume_desc->bitmap_end);
-		exit(-1);
+		log_fatal("address inside bitmap range? block address %llu "
+			  "bitmap_end %llu, stack trace follows",
+			  (LLU)address, (LLU)volume_desc->bitmap_end);
+		exit(EXIT_FAILURE);
 	}
-#endif
-	MUTEX_LOCK(lock);
 
-	address = (void *)((uint64_t)address - MAPPED);
+	MUTEX_LOCK(&volume_desc->free_log_lock);
+
+	uint64_t dev_offt = (uint64_t)address - MAPPED;
 	while (1) {
-		if (*(uint64_t *)log_position % 4096 == 4080) /*go to next block*/
-			*(uint64_t *)log_position += 16;
-
-		if (*(uint64_t *)log_position <
-		    *(uint64_t *)log_last_free + (SIZE * 4096)) /*we have space, no wrap around. Add log entry*/
-		{
-			addr = (void *)(uint64_t)log_starting_addr + (*(uint64_t *)log_position % (SIZE * 4096));
-			*(uint64_t *)addr = volume_desc->mem_catalogue->epoch;
-			*(uint64_t *)(addr + 8) = (uint64_t)address;
-			*(uint32_t *)(addr + 16) = length;
-			*(uint64_t *)log_position += 20;
+		uint64_t next_pos = volume_desc->mem_catalogue->free_log_position % free_log_size;
+		uint64_t last_free = volume_desc->mem_catalogue->free_log_last_free % free_log_size;
+		if (next_pos >= last_free) {
+			struct free_op_entry entry = { .epoch = volume_desc->mem_catalogue->epoch,
+						       .dev_offt = dev_offt,
+						       .length = length };
+			char *dest = (char *)(MAPPED + free_log_offt + next_pos);
+			memcpy(dest, &entry, sizeof(struct free_op_entry));
+			volume_desc->mem_catalogue->free_log_position += sizeof(struct free_op_entry);
+			MUTEX_UNLOCK(&volume_desc->free_log_lock);
 			break;
 		} else {
-			/*we ve hit the other pointer, force free cleaner to run and issue a
-* snapshot*/
-			/*possible bug here please double check*/
-			log_warn("OUT OF LOG SPACE: No room for writing log_entry forcing snapshot");
-			assert(0);
-
-			MUTEX_UNLOCK(lock);
+			MUTEX_UNLOCK(&volume_desc->free_log_lock);
 			MUTEX_LOCK(&volume_desc->mutex);
-
+			log_warn("OUT OF LOG SPACE: No room for writing log_entry forcing snapshot");
 			pthread_cond_signal(&(volume_desc->cond));
-			free(volume_desc);
 			MUTEX_UNLOCK(&volume_desc->mutex);
-			return;
+			sleep(4);
 		}
 	}
-	MUTEX_UNLOCK(lock);
-	// pthread_mutex_unlock(lock);
+	return;
 }
 
 void free_block(struct volume_descriptor *volume_desc, void *address, uint32_t length)
 {
-	//uint64_t pageno = ((uint64_t)address - MAPPED) / DEVICE_BLOCK_SIZE;
-	//int32_t num_of_pages = length / 4096;
-	//int32_t i;
-	//assert((uint64_t)address >= MAPPED &&
+	//assert(length == SEGMENT_SIZE);
+	// uint64_t pageno = ((uint64_t)address - MAPPED) / DEVICE_BLOCK_SIZE;
+	// int32_t num_of_pages = length / 4096;
+	// int32_t i;
+	// assert((uint64_t)address >= MAPPED &&
 	//      (uint64_t)address <= (MAPPED + volume_desc->size));
-	add_log_entry(volume_desc, address, length, FREE_BLOCK);
+	add_log_entry(volume_desc, address, length);
 
-	//for (i = 0; i < num_of_pages; i++) {
-	//printf("[%s:%s:%d] reducing priority of pageno
+	// for (i = 0; i < num_of_pages; i++) {
+	// printf("[%s:%s:%d] reducing priority of pageno
 	//%llu\n",__FILE__,__func__,__LINE__,(LLU)pageno);
-	//dmap_change_page_priority(FD, pageno, 10);
-	//pageno++;
+	// dmap_change_page_priority(FD, pageno, 10);
+	// pageno++;
 	//}
 }
 
@@ -1297,22 +1534,18 @@ void free_block(struct volume_descriptor *volume_desc, void *address, uint32_t l
  * previous log entries.
  * It also issues snapshot operations.
  */
-void clean_log_entries(void *v_desc)
+static void clean_log_entries(void *v_desc)
 {
-	void *normalized_addr;
-	void *block_addr;
-	uint64_t epoch;
-	uint32_t length;
-	int32_t i;
-	int32_t rc;
+	int rc;
 	struct timespec ts;
 	volume_descriptor *volume_desc = (volume_descriptor *)v_desc;
+	uint64_t free_log_size = FREE_LOG_SIZE_IN_BLOCKS * DEVICE_BLOCK_SIZE;
 	pthread_setname_np(pthread_self(), "cleanerd");
 
-	/*Are we operating with filter block device or not?...Let's discover with an
-* ioctl*/
+	//Are we operating with filter block device or not?...Let's discover with an
+	//ioctl
 	int fake_blk = 0;
-	struct fake_blk_pages_num cbits;
+	uint64_t free_ops = 0;
 	uint64_t bit_idx;
 	/*single thread, per volume so we don't need locking*/
 	int ret = ioctl(FD, FAKE_BLK_IOC_TEST_CAP);
@@ -1323,125 +1556,98 @@ void clean_log_entries(void *v_desc)
 	while (1) {
 		if (clock_gettime(CLOCK_REALTIME, &ts) == -1) {
 			perror("FATAL: clock_gettime failed)\n");
-			exit(-1);
+			exit(EXIT_FAILURE);
 		}
 		ts.tv_sec += (CLEAN_INTERVAL / 1000000L);
 		ts.tv_nsec += (CLEAN_INTERVAL % 1000000L) * 1000L;
 
-		rc = MUTEX_LOCK(&volume_desc->mutex); // pthread_mutex_lock(&(volume_desc->mutex));
-		rc = pthread_cond_timedwait(&(volume_desc->cond), &(volume_desc->mutex), &ts);
+		MUTEX_LOCK(&volume_desc->mutex);
+		rc = pthread_cond_timedwait(&volume_desc->cond, &volume_desc->mutex, &ts);
+		assert(rc == 0 || rc == ETIMEDOUT);
+		MUTEX_UNLOCK(&volume_desc->mutex);
 
 		if (rc == 0) {
-			/*cleaner singaled due to space pressure*/
-			log_info("Space pressure forcing snapshot");
-			MUTEX_UNLOCK(&volume_desc->mutex);
-			// pthread_mutex_unlock(&(volume_desc->mutex));/*unlock*/
-			snapshot(volume_desc); /*force snapshot*/
+			//cleaner singaled due to space pressure
+			log_warn("Woke up due to space pressure");
+			force_snapshot(volume_desc);
 			if (volume_desc->state == VOLUME_IS_CLOSING) {
 				volume_desc->state = VOLUME_IS_CLOSED;
-				printf("[%s],log cleaner exiting for volume id:%s exiting due to "
-				       "volume close\n",
-				       __func__, volume_desc->volume_id);
+				log_warn("log cleaner exiting for volume id:%s exiting due to "
+					 "volume close",
+					 volume_desc->volume_id);
 				return;
 			}
-			MUTEX_LOCK(&volume_desc->mutex);
-			// pthread_mutex_lock(&(volume_desc->mutex));/*lock again to resume*/
 		}
-		MUTEX_LOCK(&volume_desc->allocator_lock);
-		// pthread_mutex_lock(&(volume_desc->allocator_lock));	/*lock allocator
-		// metadata*/
+
+		struct fake_blk_pages_num cbits;
 		cbits.num = 0;
 
-		for (i = 0; i < CLEAN_SIZE; i++) {
-			if (volume_desc->mem_catalogue->free_log_last_free % 4096 == 4080) /*go to next block*/
-				volume_desc->mem_catalogue->free_log_last_free += 16;
+		while (volume_desc->mem_catalogue->free_log_last_free < volume_desc->mem_catalogue->free_log_position) {
+			MUTEX_LOCK(&volume_desc->free_log_lock);
+			uint64_t free_entry_offt = volume_desc->mem_catalogue->free_log_last_free % free_log_size;
+			struct free_op_entry *fp =
+				(struct free_op_entry *)(MAPPED + sizeof(struct superblock) + free_entry_offt);
 
-			if (volume_desc->mem_catalogue->free_log_last_free <
-			    volume_desc->dev_catalogue->free_log_position) /*there is work to be
-                        done*/
-			{
-				normalized_addr = (void *)((uint64_t)volume_desc->start_addr + (uint64_t)4096 +
-							   (uint64_t)(volume_desc->mem_catalogue->free_log_last_free %
-								      (FREE_LOG_SIZE * 4096))); /* XXX TODO XXX
-recheck here */
-				epoch = *(uint64_t *)normalized_addr;
-				block_addr = (void *)MAPPED + *(uint64_t *)(normalized_addr + 8);
-				length = *(uint32_t *)(normalized_addr + 16);
-
-				if (epoch < volume_desc->dev_catalogue->epoch) {
-					if (length % DEVICE_BLOCK_SIZE != 0) {
-						log_fatal("misaligned length in FREE_SPACE operation");
-						exit(EXIT_FAILURE);
-					}
-					/*fix to free properly sizes of 256KB*/
-					uint64_t free_start = (uint64_t)block_addr;
-					uint64_t free_end = free_start + length;
-					uint64_t free_length;
-					while (free_start < free_end) {
-						free_length = free_end - free_start;
-						if (free_length > 4096)
-							free_length = 4096;
-						mark_block(v_desc, (void *)free_start, free_length, 0x1, &bit_idx);
-						/*if we use filter block device, update it with the mark block
-* operation*/
-						if (fake_blk) {
-							uint32_t pagenum = free_length / 4096;
-							uint32_t ii;
-							for (ii = 0; ii < pagenum; ii++) {
-								cbits.blocks[cbits.num++] = bit_idx + ii;
-								/*if (cbits.num == 511)//now we should issue the ioctl
-{
-ret =	ioctl(FD, FAKE_BLK_IOC_ZERO_PAGES,&cbits);
-if(ret != 0)
-{
-fprintf(stderr, "ERROR! %s:%s():%d\n",__FILE__, __func__, __LINE__);
-exit(EXIT_FAILURE);
-}
-cbits.num = 0;
-}*/
-							}
-							ret = ioctl(FD, FAKE_BLK_IOC_ZERO_PAGES, &cbits);
-							memset(cbits.blocks, 0x00, 511 * sizeof(uint64_t));
-							cbits.num = 0;
-						}
-						free_start += 4096;
-					}
-					volume_desc->mem_catalogue->free_log_last_free += 20;
-				} else /*entries with fresh epochs, stop and resume later*/
-					break;
-			} else /*no nore work to be done, resume later*/
+			if (fp->epoch >= volume_desc->mem_catalogue->epoch) {
+				//We don't know if these free operations will survive
+				//log_info("Can't free entry's epoch %llu soft epoch %llu", fp->epoch,
+				//	 volume_desc->mem_catalogue->epoch);
+				MUTEX_UNLOCK(&volume_desc->free_log_lock);
 				break;
+			}
+
+			assert(fp->dev_offt != 0);
+			if (++free_ops % 20000 == 0)
+				log_info(
+					"Freeing epoch %llu dev_offt %llu length %llu at last free %llu free los pos %llu",
+					fp->epoch, fp->dev_offt, fp->length,
+					volume_desc->mem_catalogue->free_log_last_free,
+					volume_desc->mem_catalogue->free_log_position);
+
+			MUTEX_LOCK(&volume_desc->bitmap_lock);
+			for (uint64_t L = 0; L < fp->length; L += DEVICE_BLOCK_SIZE) {
+				void *addr = (void *)(MAPPED + fp->dev_offt + L);
+
+				bitmap_mark_block_free(volume_desc, addr);
+
+				if (fake_blk) {
+					uint32_t pagenum = (uint64_t)addr / 4096;
+					uint32_t ii;
+					for (ii = 0; ii < pagenum; ii++) {
+						bit_idx = ((uint64_t)addr - MAPPED) / DEVICE_BLOCK_SIZE;
+						cbits.blocks[cbits.num++] = bit_idx + ii;
+						//if (cbits.num == 511)//now we should issue the ioctl
+						//{
+						//ret =	ioctl(FD, FAKE_BLK_IOC_ZERO_PAGES,&cbits);
+						//if(ret != 0)
+						//{
+						//fprintf(stderr, "ERROR! %s:%s():%d\n",__FILE__, __func__, __LINE__);
+						//exit(EXIT_FAILURE);
+						//}
+						//cbits.num = 0;
+						//}
+					}
+					ioctl(FD, FAKE_BLK_IOC_ZERO_PAGES, &cbits);
+					memset(cbits.blocks, 0x00, 511 * sizeof(uint64_t));
+					cbits.num = 0;
+				}
+			}
+			MUTEX_UNLOCK(&volume_desc->bitmap_lock);
+
+			volume_desc->mem_catalogue->free_log_last_free += sizeof(struct free_op_entry);
+			MUTEX_UNLOCK(&volume_desc->free_log_lock);
 		}
 
-		/*issue the last ioctl if needed
-if(fake_blk && cbits.num>0)
-{
-ret = ioctl(FD, FAKE_BLK_IOC_ZERO_PAGES, &cbits);
-if (ret != 0)
-{
-fprintf(stderr, "ERROR! %s:%s():%d\n", __FILE__,__func__, __LINE__);
-exit(EXIT_FAILURE);
-}
-}*/
-		MUTEX_UNLOCK(&volume_desc->allocator_lock);
-		MUTEX_UNLOCK(&volume_desc->mutex);
-		/* pthread_mutex_unlock(&(volume_desc->allocator_lock));	/\*release
-* allocator lock*\/ */
-		/* pthread_mutex_unlock(&(volume_desc->mutex));/\*unlock, to go to sleep*\/
-*/
 		/*snapshot check*/
-		uint64_t timestamp = get_timestamp();
-		if ((timestamp - volume_desc->last_snapshot) >= SNAPSHOT_INTERVAL)
+		uint64_t time = get_timestamp();
+		if ((time - volume_desc->last_snapshot) >= SNAPSHOT_INTERVAL)
 			snapshot(volume_desc);
-		//else if (ts - volume_desc->last_commit > COMMIT_KV_LOG_INTERVAL)
-		//commit_db_logs_per_volume(volume_desc);
+		// else if (ts - volume_desc->last_commit > COMMIT_KV_LOG_INTERVAL)
+		// commit_db_logs_per_volume(volume_desc);
 	}
 }
 
-// void * parse_delete_key_entries()
-//{
-
-//}
+#if 0
 void mark_block(volume_descriptor *volume_desc, void *block_address, uint32_t length, char free, uint64_t *bit_idx)
 {
 	void *base = (void *)0xFFFFFFFFFFFFFFFF;
@@ -1455,8 +1661,8 @@ void mark_block(volume_descriptor *volume_desc, void *block_address, uint32_t le
 
 	*bit_idx = ((uint64_t)block_address - MAPPED) / DEVICE_BLOCK_SIZE;
 
-	/*Divide with 8 to see in which bitmap byte is and mod will inform us about
-* which bit in the byte */
+	// Divide with 8 to see in which bitmap byte is and mod will inform us about
+	// which bit in the byte
 	uint64_t bitmap_byte = bitmap_bit / 8;
 	uint64_t bitmap_block = bitmap_byte / 4088; /* Each bitmap block has BLKSIZE - 8 bytes */
 	uint64_t bitmap_offset = bitmap_bit % 8;
@@ -1520,8 +1726,8 @@ void mark_block(volume_descriptor *volume_desc, void *block_address, uint32_t le
 
 		memcpy(left_bitmap, right_bitmap, 4096); /* Leave right sealed block, update the left */
 		*(left_bitmap) = volume_desc->mem_catalogue->epoch; /* update the epoch in
-                                   the left block with
-                                   soft epoch */
+           the left block with
+           soft epoch */
 		*(volume_desc->allocator_state + pos) &=
 			~(1 << (pos_bit + 1)); /* finally change status from "10" to "00" */
 		*(volume_desc->sync_signal + pos) |= 1 << pos_bit; /* change sync signal from 00 to 01 */
@@ -1577,3 +1783,4 @@ right buddy */
 	printf("PROFILE: mark_block took %lu micro seconds\n", duration);
 #endif
 }
+#endif

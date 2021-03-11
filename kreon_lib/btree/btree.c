@@ -738,9 +738,9 @@ db_handle *db_open(char *volumeName, uint64_t start, uint64_t size2, char *db_na
 		volume_desc->open_databases = init_list(&destoy_db_list_node);
 		volume_desc->offset = start;
 		/*allocator lock*/
-		MUTEX_INIT(&(volume_desc->allocator_lock), NULL);
+		MUTEX_INIT(&(volume_desc->bitmap_lock), NULL);
 		/*free operations log*/
-		MUTEX_INIT(&(volume_desc->FREE_LOG_LOCK), NULL);
+		MUTEX_INIT(&(volume_desc->free_log_lock), NULL);
 		//this call will fill volume's size
 		allocator_init(volume_desc);
 		add_first(mappedVolumes, volume_desc, key);
@@ -749,7 +749,7 @@ db_handle *db_open(char *volumeName, uint64_t start, uint64_t size2, char *db_na
 		//segment inside the volume
 		volume_desc->segment_utilization_vector_size =
 			((volume_desc->volume_superblock->dev_size_in_blocks -
-			  (1 + FREE_LOG_SIZE + volume_desc->volume_superblock->bitmap_size_in_blocks)) /
+			  (1 + FREE_LOG_SIZE_IN_BLOCKS + volume_desc->volume_superblock->bitmap_size_in_blocks)) /
 			 (SEGMENT_SIZE / DEVICE_BLOCK_SIZE)) *
 			2;
 		volume_desc->segment_utilization_vector =
@@ -761,7 +761,7 @@ db_handle *db_open(char *volumeName, uint64_t start, uint64_t size2, char *db_na
 			exit(EXIT_FAILURE);
 		}
 		memset(volume_desc->segment_utilization_vector, 0x00, volume_desc->segment_utilization_vector_size);
-		log_info("Open volume %s successfully", volume_desc->volume_name);
+		log_info("Opened volume %s successfully", volume_desc->volume_name);
 		bt_reclaim_volume_space(volume_desc);
 	} else {
 		//log_info("Volume already mapped");
@@ -843,7 +843,7 @@ db_handle *db_open(char *volumeName, uint64_t start, uint64_t size2, char *db_na
 		// log_info("mem epoch %llu", volume_desc->mem_catalogue->epoch);
 		if (empty_index == -1) {
 			/*space found in empty group*/
-			pr_db_group *new_group = get_space_for_system(volume_desc, sizeof(pr_db_group));
+			pr_db_group *new_group = get_space_for_system(volume_desc, sizeof(pr_db_group), 1);
 			memset(new_group, 0x00, sizeof(pr_db_group));
 			new_group->epoch = volume_desc->mem_catalogue->epoch;
 			volume_desc->mem_catalogue->db_group_index[empty_group] =
@@ -1167,9 +1167,11 @@ void *append_key_value_to_log(log_operation *req)
 
 		allocated_space = data_size.kv_size + sizeof(segment_header);
 		allocated_space += SEGMENT_SIZE - (allocated_space % SEGMENT_SIZE);
-
 		d_header = seg_get_raw_log_segment(handle->volume_desc);
-		assert(((uint64_t)d_header - MAPPED) % SEGMENT_SIZE == 0);
+		if (((uint64_t)d_header - MAPPED) % SEGMENT_SIZE != 0) {
+			log_fatal("Misalinged allocation d_header offt %llu", (uint64_t)d_header - MAPPED);
+			exit(EXIT_FAILURE);
+		}
 		memset(d_header->garbage_bytes, 0x00, 2 * MAX_COUNTER_VERSIONS * sizeof(uint64_t));
 		d_header->segment_id = handle->db_desc->KV_log_last_segment->segment_id + 1;
 		d_header->next_segment = NULL;

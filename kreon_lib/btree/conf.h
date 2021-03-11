@@ -30,20 +30,14 @@
 
 /*for allocator.c*/
 #define DEV_NAME_MAX 512 /* Length of the device name */
-#define DATA_PER_BITMAP_BLOCK ((DEVICE_BLOCK_SIZE - 8) * 8) /*Data blocks addressed per bitmap block*/
-#define FREE_LOG_SIZE 512000 /*size in 4KB blocks of the log used for marking the free ops*/
-
-#define MAX_HANDLES 5090
-#define CLEAN_SIZE 500000
 
 #define SEC (1000000L)
 
-#define CLEAN_INTERVAL (10 * SEC)
+#define CLEAN_INTERVAL (1 * SEC)
 //#define COMMIT_KV_LOG_INTERVAL (500 * SEC)
 #define SNAPSHOT_INTERVAL (1500 * SEC)
 #define GC_INTERVAL (50 * SEC)
 
-#define WORD_SIZE 64
 #define BREAKPOINT asm volatile("int3;");
 
 #define KB (1024)

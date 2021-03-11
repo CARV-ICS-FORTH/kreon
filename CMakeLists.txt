@@ -57,8 +57,8 @@ include_directories(${CMAKE_BINARY_DIR})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/kreon_lib/include)
 
 if(ADD_SANITIZERS)
-  set(CMAKE_C_FLAGS "-fsanitize=address,leak ${CMAKE_C_FLAGS}")
-  set(CMAKE_CXX_FLAGS "-fsanitize=address,leak ${CMAKE_CXX_FLAGS}")
+  set(CMAKE_C_FLAGS "-fsanitize=address,leak,undefined ${CMAKE_C_FLAGS}")
+  set(CMAKE_CXX_FLAGS "-fsanitize=address,leak,undefined ${CMAKE_CXX_FLAGS}")
 endif()
 
 set(CMAKE_C_FLAGS

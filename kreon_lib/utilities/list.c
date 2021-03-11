@@ -16,9 +16,9 @@
 #include <string.h>
 #include "list.h"
 
-LIST *init_list(void (*destroy_func)(NODE *node))
+LIST *init_list(void (*destroy_my_node)(NODE *node))
 {
-	(void)destroy_func;
+	(void)destroy_my_node;
 	LIST *list = (LIST *)malloc(sizeof(LIST));
 	list->size = 0;
 	list->first = NULL;
@@ -28,6 +28,8 @@ LIST *init_list(void (*destroy_func)(NODE *node))
 
 void *get_first(LIST *list)
 {
+	if (!list)
+		return NULL;
 	return list->first;
 }
 
@@ -124,9 +126,7 @@ int remove_element(LIST *list, void *data)
 void *find_element(LIST *list, char *key)
 {
 	NODE *node = list->first;
-	int i;
-	i = 0;
-	for (i = 0; i < list->size; i++) {
+	for (int i = 0; i < list->size; i++) {
 		if (strcmp(node->tag, key) == 0)
 			return node->data;
 		node = node->next;
