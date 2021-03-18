@@ -29,10 +29,8 @@ include(GNUInstallDirs)
 include(cmake_utils/mkfs.cmake.in)
 include(cmake_utils/ycsb.cmake.in)
 
-FetchContent_Declare(
-  log # Recommendation: Stick close to the original name.
-  GIT_REPOSITORY https://github.com/innerout/log.c.git
-  GIT_TAG 14bd35e20438bf8b7c45d37a66c71461d3cdfa94)
+FetchContent_Declare(log # Recommendation: Stick close to the original name.
+                     GIT_REPOSITORY https://github.com/innerout/log.c.git)
 
 FetchContent_GetProperties(log)
 
