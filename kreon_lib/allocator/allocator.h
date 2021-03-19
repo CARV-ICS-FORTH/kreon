@@ -67,8 +67,6 @@ typedef enum volume_state { VOLUME_IS_OPEN = 0x00, VOLUME_IS_CLOSING = 0x01, VOL
 #define SNAP_INTERRUPT_ENABLE 0x0A
 #define SNAP_INTERRUPT_DISABLE 0x0B
 
-extern LIST *mappedVolumes;
-
 /*the global mountpoint of a volume*/
 extern uint64_t MAPPED;
 extern int FD;
@@ -201,7 +199,7 @@ typedef struct volume_descriptor {
 	struct bitmap_buddies_state *buddies_vector;
 
 	superblock *volume_superblock; /*address of volume's superblock*/
-	LIST *open_databases;
+	struct klist *open_databases;
 
 	/*free log start*/
 	uint64_t log_size;
@@ -216,8 +214,8 @@ typedef struct volume_descriptor {
 	 This is used for indicating to future allocation operations if they should search
 	 a given bitmap-zone or not.*/
 	uint64_t max_suffix;
-	uint16_t *segment_utilization_vector;
-	uint64_t segment_utilization_vector_size;
+	//uint16_t *segment_utilization_vector;
+	//uint64_t segment_utilization_vector_size;
 	/*<stats counters>*/
 	uint64_t collisions;
 	uint64_t hits;
@@ -239,12 +237,11 @@ typedef struct volume_descriptor {
  * @return >= 0 in case of success. < 0 otherwise.
  */
 
+struct volume_descriptor *get_volume_desc(char *volume_name, uint64_t start_offt, char create);
 int32_t volume_init(char *dev_name, int64_t start, int64_t size, int typeOfVolume);
 
 void force_snapshot(volume_descriptor *volume_desc);
 void snapshot(volume_descriptor *volume_desc);
-void destoy_db_list_node(NODE *node);
-void destroy_volume_node(NODE *node);
 
 void allocator_init(volume_descriptor *volume_desc);
 

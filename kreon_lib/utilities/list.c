@@ -16,54 +16,55 @@
 #include <string.h>
 #include "list.h"
 
-LIST *init_list(void (*destroy_my_node)(NODE *node))
+struct klist *klist_init(void)
 {
-	(void)destroy_my_node;
-	LIST *list = (LIST *)malloc(sizeof(LIST));
+	struct klist *list = (struct klist *)calloc(1, sizeof(struct klist));
 	list->size = 0;
 	list->first = NULL;
 	list->last = NULL;
 	return list;
 }
 
-void *get_first(LIST *list)
+void *klist_get_first(struct klist *list)
 {
 	if (!list)
 		return NULL;
 	return list->first;
 }
 
-void add_first(LIST *list, void *data, const char *tag)
+void klist_add_first(struct klist *list, void *data, const char *data_key, destroy_node_data destroy_data)
 {
-	NODE *node = (NODE *)malloc(sizeof(NODE));
+	struct klist_node *node = (struct klist_node *)calloc(1, sizeof(struct klist_node));
 	node->data = data;
-	if (tag) {
-		node->tag = malloc(strlen(tag) + 1);
-		strcpy(node->tag, tag);
+	if (data_key) {
+		node->key = malloc(strlen(data_key) + 1);
+		strcpy(node->key, data_key);
 	}
+	node->destroy_data = destroy_data;
 	if (list->size == 0) {
 		node->prev = NULL;
 		node->next = NULL;
 		list->first = node;
 		list->last = node;
-
 	} else {
 		node->prev = NULL;
 		node->next = list->first;
 		list->first->prev = node;
 		list->first = node;
 	}
-	list->size++;
+	++list->size;
+	return;
 }
 
-void add_last(LIST *list, void *data, const char *tag)
+void klist_add_last(struct klist *list, void *data, const char *data_key, destroy_node_data destroy_data)
 {
-	NODE *node = malloc(sizeof(NODE));
+	struct klist_node *node = calloc(1, sizeof(struct klist_node));
 	node->data = data;
-	if (tag != NULL) {
-		node->tag = malloc(strlen(tag) + 1);
-		strcpy(node->tag, tag);
+	if (data_key != NULL) {
+		node->key = malloc(strlen(data_key) + 1);
+		strcpy(node->key, data_key);
 	}
+	node->destroy_data = destroy_data;
 	if (list->size == 0) {
 		node->prev = NULL;
 		node->next = NULL;
@@ -75,36 +76,34 @@ void add_last(LIST *list, void *data, const char *tag)
 		list->last->next = node;
 		list->last = node;
 	}
-	list->size++;
+	++list->size;
+	return;
 }
 
-void *remove_first(LIST *list)
+void *klist_remove_first(struct klist *list)
 {
-	NODE *node;
+	struct klist_node *node;
 	if (list->size > 1) {
 		node = list->first;
 		list->first = list->first->next;
 		list->first->prev = NULL;
 		--list->size;
-		// destroyNode(node);
 		return node;
 	} else if (list->size == 1) {
 		node = list->first;
 		list->size = 0;
 		list->first = NULL;
 		list->last = NULL;
-		// destroyNode(node);
 		return node;
 	} else
-		return NULL; /* list empty */
+		return NULL;
 }
 
-int remove_element(LIST *list, void *data)
+int klist_remove_element(struct klist *list, void *data)
 {
-	NODE *node;
-	int i;
+	struct klist_node *node;
 	node = list->first;
-	for (i = 0; i < list->size; i++) {
+	for (int i = 0; i < list->size; i++) {
 		if (node->data == data) {
 			if (node->next != NULL) /*node is not the last*/
 				node->next->prev = node->prev;
@@ -114,8 +113,10 @@ int remove_element(LIST *list, void *data)
 				node->prev->next = node->next;
 			else
 				list->first = node->next;
-			list->size--;
-			destroy_node(node);
+			--list->size;
+			if (node->key)
+				free(node->key);
+			free(node);
 			return 1;
 		}
 		node = node->next;
@@ -123,26 +124,52 @@ int remove_element(LIST *list, void *data)
 	return 0;
 }
 
-void *find_element(LIST *list, char *key)
+int klist_delete_element(struct klist *list, void *data)
 {
-	NODE *node = list->first;
+	struct klist_node *node;
+	node = list->first;
 	for (int i = 0; i < list->size; i++) {
-		if (strcmp(node->tag, key) == 0)
+		if (node->data == data) {
+			if (node->next != NULL) /*node is not the last*/
+				node->next->prev = node->prev;
+			else
+				list->last = node->prev;
+			if (node->prev != NULL) /*node is not the first*/
+				node->prev->next = node->next;
+			else
+				list->first = node->next;
+			--list->size;
+			(*node->destroy_data)(node->data);
+			if (node->key)
+				free(node->key);
+			free(node);
+			return 1;
+		}
+		node = node->next;
+	}
+	return 0;
+}
+
+void *klist_find_element_with_key(struct klist *list, char *data_key)
+{
+	struct klist_node *node = list->first;
+	for (int i = 0; i < list->size; i++) {
+		if (strcmp(node->key, data_key) == 0)
 			return node->data;
 		node = node->next;
 	}
 	return NULL;
 }
 
-/*custom destroy code*/
-void destroy_node(NODE *node)
-{ /*XXX TODO XXX*/
-	(void)node;
-}
-
-void destroy_list(LIST *list)
+void klist_destroy(struct klist *list)
 {
-	void *node;
-	while ((node = remove_first(list)) != NULL)
-		destroy_node(node);
+	struct klist_node *node = list->first;
+	struct klist_node *next_node = NULL;
+	while (node != NULL) {
+		next_node = node->next;
+		klist_delete_element(list, node->data);
+		node = next_node;
+	}
+	free(list);
+	return;
 }

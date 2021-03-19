@@ -96,7 +96,7 @@ void force_snapshot(volume_descriptor *volume_desc)
 
 static void stop_the_world(struct volume_descriptor *volume_desc)
 {
-	NODE *node = get_first(volume_desc->open_databases);
+	struct klist_node *node = klist_get_first(volume_desc->open_databases);
 	while (node != NULL) {
 		struct db_descriptor *db_desc = (struct db_descriptor *)(node->data);
 		/*stop all writers clients and compaction threads*/
@@ -116,7 +116,7 @@ static void stop_the_world(struct volume_descriptor *volume_desc)
 
 static void resume_the_world(struct volume_descriptor *volume_desc)
 {
-	NODE *node = get_first(volume_desc->open_databases);
+	struct klist_node *node = klist_get_first(volume_desc->open_databases);
 	while (node != NULL) {
 		struct db_descriptor *db_desc = (struct db_descriptor *)(node->data);
 		for (int level_id = 0; level_id < MAX_LEVELS; level_id++) {
@@ -151,7 +151,7 @@ void snapshot(volume_descriptor *volume_desc)
 	}
 
 	//Iterate dbs
-	NODE *node = get_first(volume_desc->open_databases);
+	struct klist_node *node = klist_get_first(volume_desc->open_databases);
 	while (node != NULL) {
 		struct db_descriptor *db_desc = (struct db_descriptor *)(node->data);
 

@@ -148,7 +148,7 @@ void *gc_log_entries(void *v_desc)
 	stack *marks;
 	volume_descriptor *volume_desc = (volume_descriptor *)v_desc;
 	db_descriptor *db_desc = NULL;
-	NODE *region;
+	struct klist_node *region;
 	int rc;
 
 	marks = malloc(sizeof(stack));
@@ -183,7 +183,7 @@ void *gc_log_entries(void *v_desc)
 			pthread_exit(NULL);
 		}
 
-		region = get_first(volume_desc->open_databases);
+		region = klist_get_first(volume_desc->open_databases);
 
 		while (region != NULL) {
 			db_desc = (db_descriptor *)region->data;
