@@ -10,6 +10,10 @@ workloads_path = "workloads/"
 onlyfiles = [f for f in listdir(workloads_path) if isfile(join(workloads_path, f))]
 temp_buffers = {}
 
+if len(sys.argv) != 3:
+    print("./generate_workloads recordcount operationcount")
+    sys.exit(os.EX_NOINPUT)
+
 for filename in onlyfiles:
     rel_path = workloads_path + filename
     with open(rel_path, "r") as file:

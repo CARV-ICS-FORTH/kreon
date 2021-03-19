@@ -2,6 +2,11 @@
 set -euo pipefail
 # This script takes the path to a file the recordcount and operationcount and generates the ycsb workloads. Finally it runs ycsb
 # Invocation command ./run-ycsb.sh /path/to/file recordcount operationcount
+if [ "$#" -ne 3 ]; then
+	echo "./run-ycsb.sh /path/to/file recordcount operationcount"
+	exit 1
+fi
+
 ./mkfs.kreon.single.sh "$1" 1 1
 ./generate_workloads.py "$2" "$3"
 # Run A to D
