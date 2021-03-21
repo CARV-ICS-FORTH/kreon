@@ -62,7 +62,7 @@ if(ADD_SANITIZERS)
 endif()
 
 set(CMAKE_C_FLAGS
-    "-std=gnu11 -Wstrict-prototypes -Wall -Wextra -fPIC -fno-omit-frame-pointer -Wunused -Wuninitialized -Wshadow -Wnull-dereference ${CMAKE_C_FLAGS}"
+    "-std=gnu11 -Wstrict-prototypes -Wall -Wextra -fPIC -fno-omit-frame-pointer -Wunused -Wuninitialized -Wshadow -Wno-address-of-packed-member -Wnull-dereference ${CMAKE_C_FLAGS}"
 )
 set(CMAKE_C_FLAGS_DEBUG "-ggdb3 -Og ${CMAKE_C_FLAGS_DEBUG}")
 set(CMAKE_C_FLAGS_RELEASE

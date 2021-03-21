@@ -16,8 +16,9 @@
 #include <string.h>
 #include "list.h"
 
-LIST *init_list(void (*destroy_node)(NODE *node))
+LIST *init_list(void (*destroy_func)(NODE *node))
 {
+	(void)destroy_func;
 	LIST *list = (LIST *)malloc(sizeof(LIST));
 	list->size = 0;
 	list->first = NULL;
@@ -136,6 +137,7 @@ void *find_element(LIST *list, char *key)
 /*custom destroy code*/
 void destroy_node(NODE *node)
 { /*XXX TODO XXX*/
+	(void)node;
 }
 
 void destroy_list(LIST *list)

@@ -25,6 +25,7 @@ static int sh_cmp_heap_nodes(struct sh_min_heap *hp, struct sh_heap_node *nd_1, 
  */
 void sh_init_heap(struct sh_min_heap *heap, int active_tree)
 {
+	(void)active_tree;
 	heap->size = 0;
 	// heap->active_tree = active_tree;
 }
@@ -57,6 +58,7 @@ static inline void heapify(struct sh_min_heap *hp, int i)
 
 static int sh_cmp_heap_nodes(struct sh_min_heap *hp, struct sh_heap_node *nd_1, struct sh_heap_node *nd_2)
 {
+	(void)hp;
 	int64_t ret;
 
 	if (nd_1->type == KV_FORMAT && nd_2->type == KV_FORMAT)

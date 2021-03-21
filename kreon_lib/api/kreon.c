@@ -23,10 +23,10 @@ klc_handle klc_open(klc_db_options *options)
 	switch (options->create_flag) {
 	case KLC_CREATE_DB:
 		return (klc_handle)db_open(options->volume_name, options->volume_start, options->volume_size,
-					   options->db_name, CREATE_DB);
+					   (char *)options->db_name, CREATE_DB);
 	case KLC_DONOT_CREATE_DB:
 		return (klc_handle)db_open(options->volume_name, options->volume_start, options->volume_size,
-					   options->db_name, DONOT_CREATE_DB);
+					   (char *)options->db_name, DONOT_CREATE_DB);
 	default:
 		printf("Unknown open option flag\n");
 		return NULL;
@@ -83,7 +83,7 @@ klc_ret_code klc_exists(klc_handle handle, struct klc_key *key)
 
 klc_ret_code klc_delete(klc_handle handle, struct klc_key *key)
 {
-	int ret = delete_key((db_handle *)handle, key->data, key->size);
+	int ret = delete_key((db_handle *)handle, (void *)key->data, key->size);
 
 	if (ret == SUCCESS)
 		return KLC_SUCCESS;
@@ -102,10 +102,10 @@ struct klc_scanner {
 	char *kv_buf;
 };
 
-klc_scanner klc_init_scanner(klc_handle db_handle, struct klc_key *key, klc_seek_mode mode)
+klc_scanner klc_init_scanner(klc_handle handle, struct klc_key *key, klc_seek_mode mode)
 {
 	char tmp[KLC_MAX_PREALLOCATED_SIZE];
-	struct db_handle *hd = (struct db_handle *)db_handle;
+	struct db_handle *hd = (struct db_handle *)handle;
 	struct klc_seek_key {
 		uint32_t key_size;
 		char key[];
@@ -235,9 +235,9 @@ struct klc_value klc_get_value(klc_scanner s)
 	return val;
 }
 
-klc_ret_code klc_sync(klc_handle db_handle)
+klc_ret_code klc_sync(klc_handle dbhandle)
 {
-	struct db_handle *handle = (struct db_handle *)db_handle;
+	struct db_handle *handle = (struct db_handle *)dbhandle;
 	snapshot(handle->volume_desc);
 	return KLC_SUCCESS;
 }
