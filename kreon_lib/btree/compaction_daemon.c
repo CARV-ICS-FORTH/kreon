@@ -134,10 +134,12 @@ static void comp_write_segment(char *buffer, uint64_t dev_offt, uint32_t buf_off
 		}
 		total_bytes_written += bytes_written;
 	}
+#if 0
 	if (fsync(fd)) {
 		log_fatal("Failed to sync file");
 		exit(EXIT_FAILURE);
 	}
+#endif
 	return;
 }
 
@@ -377,10 +379,12 @@ static void comp_close_write_cursor(struct comp_level_write_cursor *c)
 				   c->fd);
 		// log_info("Dumped buffer %u at dev_offt %llu",i,c->dev_offt[i]);
 	}
+#if 0
 	if (fsync(c->fd)) {
 		log_fatal("Failed to sync file");
 		exit(EXIT_FAILURE);
 	}
+#endif
 
 	return;
 }
@@ -405,11 +409,13 @@ static void comp_get_space(struct comp_level_write_cursor *c, uint32_t height, n
 					   SEGMENT_SIZE, c->fd);
 			// uint32_t *type = (uint32_t *)&c->segment_buf[0][4096];
 			// assert(*type == leafNode || *type == leafRootNode);
+#if 0
 			if (fsync(FD) != 0) {
 				log_fatal("Failed to sync file!");
 				perror("Reason:\n");
 				exit(EXIT_FAILURE);
 			}
+#endif
 			// type = (uint32_t *)(MAPPED + c->dev_offt[0] + 4096);
 			// assert(*type == leafNode || *type == leafRootNode);
 			// type = (uint32_t

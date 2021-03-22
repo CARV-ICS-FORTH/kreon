@@ -15,10 +15,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include "list.h"
+#include <log.h>
 
 struct klist *klist_init(void)
 {
 	struct klist *list = (struct klist *)calloc(1, sizeof(struct klist));
+	if (!list) {
+		log_fatal("Calloc failed");
+		exit(EXIT_FAILURE);
+	}
 	list->size = 0;
 	list->first = NULL;
 	list->last = NULL;
@@ -35,9 +40,17 @@ void *klist_get_first(struct klist *list)
 void klist_add_first(struct klist *list, void *data, const char *data_key, destroy_node_data destroy_data)
 {
 	struct klist_node *node = (struct klist_node *)calloc(1, sizeof(struct klist_node));
+	if (!node) {
+		log_fatal("Calloc failed out of memory");
+		exit(EXIT_FAILURE);
+	}
 	node->data = data;
 	if (data_key) {
-		node->key = malloc(strlen(data_key) + 1);
+		node->key = calloc(1, strlen(data_key) + 1);
+		if (!node->key) {
+			log_fatal("Calloc failed out of memory");
+			exit(EXIT_FAILURE);
+		}
 		strcpy(node->key, data_key);
 	}
 	node->destroy_data = destroy_data;
@@ -53,15 +66,22 @@ void klist_add_first(struct klist *list, void *data, const char *data_key, destr
 		list->first = node;
 	}
 	++list->size;
-	return;
 }
 
 void klist_add_last(struct klist *list, void *data, const char *data_key, destroy_node_data destroy_data)
 {
 	struct klist_node *node = calloc(1, sizeof(struct klist_node));
+	if (!node) {
+		log_fatal("Calloc failed");
+		exit(EXIT_FAILURE);
+	}
 	node->data = data;
 	if (data_key != NULL) {
-		node->key = malloc(strlen(data_key) + 1);
+		node->key = calloc(1, strlen(data_key) + 1);
+		if (!node->key) {
+			log_fatal("calloc failed");
+			exit(EXIT_FAILURE);
+		}
 		strcpy(node->key, data_key);
 	}
 	node->destroy_data = destroy_data;
@@ -77,7 +97,6 @@ void klist_add_last(struct klist *list, void *data, const char *data_key, destro
 		list->last = node;
 	}
 	++list->size;
-	return;
 }
 
 void *klist_remove_first(struct klist *list)
@@ -171,5 +190,4 @@ void klist_destroy(struct klist *list)
 		node = next_node;
 	}
 	free(list);
-	return;
 }

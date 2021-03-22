@@ -88,13 +88,16 @@ void commit_db_logs_per_volume(volume_descriptor *volume_desc)
 }
 #endif
 
+/*As normal snapshot except it increases system's epoch
+ * even in the case where no writes have taken place
+ */
 void force_snapshot(volume_descriptor *volume_desc)
 {
 	volume_desc->force_snapshot = 1;
-	return snapshot(volume_desc);
+	snapshot(volume_desc);
 }
 
-static void stop_the_world(struct volume_descriptor *volume_desc)
+static void stop_readers_writers(struct volume_descriptor *volume_desc)
 {
 	struct klist_node *node = klist_get_first(volume_desc->open_databases);
 	while (node != NULL) {
@@ -111,10 +114,9 @@ static void stop_the_world(struct volume_descriptor *volume_desc)
 	//Acquire locks of the cleaner
 	MUTEX_LOCK(&volume_desc->free_log_lock);
 	MUTEX_LOCK(&volume_desc->bitmap_lock);
-	return;
 }
 
-static void resume_the_world(struct volume_descriptor *volume_desc)
+static void resume_readers_writers(struct volume_descriptor *volume_desc)
 {
 	struct klist_node *node = klist_get_first(volume_desc->open_databases);
 	while (node != NULL) {
@@ -129,22 +131,19 @@ static void resume_the_world(struct volume_descriptor *volume_desc)
 	//Acquire locks of the cleaner
 	MUTEX_UNLOCK(&volume_desc->free_log_lock);
 	MUTEX_UNLOCK(&volume_desc->bitmap_lock);
-	return;
 }
 
 /*persists a consistent snapshot of the system*/
 void snapshot(volume_descriptor *volume_desc)
 {
-	// struct commit_log_info log_info;
 	pr_db_group *db_group;
 	pr_db_entry *db_entry;
-	// node_header *old_root;
 	int32_t dirty = 0;
 
 	log_info("Trigerring Snapshot");
 	volume_desc->snap_preemption = SNAP_INTERRUPT_ENABLE;
 
-	stop_the_world(volume_desc);
+	stop_readers_writers(volume_desc);
 	if (volume_desc->force_snapshot) {
 		dirty = 1;
 		volume_desc->force_snapshot = 0;
@@ -153,7 +152,7 @@ void snapshot(volume_descriptor *volume_desc)
 	//Iterate dbs
 	struct klist_node *node = klist_get_first(volume_desc->open_databases);
 	while (node != NULL) {
-		struct db_descriptor *db_desc = (struct db_descriptor *)(node->data);
+		struct db_descriptor *db_desc = (struct db_descriptor *)node->data;
 
 		dirty += db_desc->dirty;
 		/*update the catalogue if db is dirty*/
@@ -177,7 +176,7 @@ void snapshot(volume_descriptor *volume_desc)
 
 				memcpy(new_group, db_group, sizeof(pr_db_group));
 				new_group->epoch = volume_desc->mem_catalogue->epoch;
-				delete_system_space(volume_desc, db_group, sizeof(pr_db_group));
+				free_system_space(volume_desc, db_group, sizeof(pr_db_group));
 				db_group = new_group;
 				volume_desc->mem_catalogue->db_group_index[db_desc->group_id] =
 					(pr_db_group *)((uint64_t)db_group - MAPPED);
@@ -212,7 +211,6 @@ void snapshot(volume_descriptor *volume_desc)
 							((uint64_t)db_desc->levels[levelid].root_w[tree_id]) - MAPPED;
 
 						/*mark old root to free it later*/
-						// old_root = db_desc->levels[i].root_r[j];
 						db_desc->levels[levelid].root_r[tree_id] =
 							db_desc->levels[levelid].root_w[tree_id];
 						db_desc->levels[levelid].root_w[tree_id] = NULL;
@@ -257,7 +255,7 @@ void snapshot(volume_descriptor *volume_desc)
 	}
 	if (dirty > 0) {
 		/*At least one db is dirty proceed to snapshot()*/
-		delete_system_space(volume_desc, volume_desc->dev_catalogue, sizeof(pr_system_catalogue));
+		free_system_space(volume_desc, volume_desc->dev_catalogue, sizeof(pr_system_catalogue));
 		volume_desc->dev_catalogue = volume_desc->mem_catalogue;
 		/*allocate a new position for superindex*/
 
@@ -275,11 +273,6 @@ void snapshot(volume_descriptor *volume_desc)
 
 	if (dirty > 0) {
 		/*At least one db is dirty proceed to snapshot()*/
-		// double t1,t2;
-		// struct timeval tim;
-
-		// gettimeofday(&tim, NULL);
-		// t1=tim.tv_sec+(tim.tv_usec/1000000.0);
 		log_info("Syncing volume... from %llu to %llu", volume_desc->start_addr, volume_desc->size);
 		if (msync(volume_desc->start_addr, volume_desc->size, MS_SYNC) != 0) {
 			log_fatal("Error at msync start_addr %llu size %llu", (LLU)volume_desc->start_addr,
@@ -297,15 +290,11 @@ void snapshot(volume_descriptor *volume_desc)
 			}
 			exit(EXIT_FAILURE);
 		}
-		// gettimeofday(&tim, NULL);
-		// t2=tim.tv_sec+(tim.tv_usec/1000000.0);
-		// fprintf(stderr, "snap_time=[%lf]sec\n", (t2-t1));
 	}
 	/*Write superblock*/
 	volume_desc->volume_superblock->system_catalogue =
 		(pr_system_catalogue *)((uint64_t)volume_desc->dev_catalogue - MAPPED);
 
-	resume_the_world(volume_desc);
+	resume_readers_writers(volume_desc);
 	volume_desc->snap_preemption = SNAP_INTERRUPT_DISABLE;
-	return;
 }

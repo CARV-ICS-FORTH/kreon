@@ -358,7 +358,7 @@ void *get_space_for_system(volume_descriptor *volume_desc, uint32_t size, int lo
 	return addr;
 }
 
-void delete_system_space(volume_descriptor *volume_desc, void *addr, uint32_t length)
+void free_system_space(volume_descriptor *volume_desc, void *addr, uint32_t length)
 {
 	(void)volume_desc;
 	(void)addr;

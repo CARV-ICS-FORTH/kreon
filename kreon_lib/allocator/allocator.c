@@ -142,7 +142,7 @@ off64_t mount_volume(char *volume_name, int64_t start, int64_t unused_size)
 	if (MAPPED == 0) {
 		log_info("Opening Volume %s", volume_name);
 		/* open the device */
-		FD = open(volume_name, O_RDWR);
+		FD = open(volume_name, O_RDWR | O_DIRECT | O_SYNC);
 		if (FD < 0) {
 			log_fatal("Failed to open %s", volume_name);
 			perror("Reason:\n");
@@ -183,13 +183,6 @@ off64_t mount_volume(char *volume_name, int64_t start, int64_t unused_size)
 		}
 	}
 
-	struct superblock *b = (struct superblock *)MAPPED;
-	if (b->magic_number != MAGIC_NUMBER) {
-		log_fatal("This volume %s does not seem to contain a valid instance. Issue "
-			  "mkfs command and retry",
-			  volume_name);
-		exit(EXIT_FAILURE);
-	}
 	MUTEX_UNLOCK(&VOLUME_LOCK);
 	return device_size;
 }
@@ -905,16 +898,20 @@ static void bitmap_init_buddies_vector(struct volume_descriptor *volume_desc, in
 
 		if (fake_blk) {
 			fake_ioc->offset = ((uint64_t)(data_offset) - (uint64_t)MAPPED) / 4096;
-			data_offset += ((4088 * 8) * 4096);
+			//data_offset += ((4088 * 8) * 4096);
+			data_offset += (WORDS_PER_BITMAP_BUDDY * WORD_SIZE_IN_BITS * DEVICE_BLOCK_SIZE);
 
 			if (winner == 0) {
-				memcpy((void *)fake_ioc->bpage, (void *)(i + sizeof(int64_t)), 4088);
+				//memcpy((void *)fake_ioc->bpage, (void *)(i + sizeof(int64_t)), 4088);
+				memcpy((void *)fake_ioc->bpage, b_pair[i].buddy[0].word,
+				       sizeof(b_pair[i].buddy[0].word));
 			} else {
-				memcpy((void *)fake_ioc->bpage, (void *)(i + DEVICE_BLOCK_SIZE + sizeof(int64_t)),
-				       4088);
+				//memcpy((void *)fake_ioc->bpage, (void *)(i + DEVICE_BLOCK_SIZE + sizeof(int64_t)),
+				//       4088);
+				memcpy((void *)fake_ioc->bpage, b_pair[i].buddy[1].word,
+				       sizeof(b_pair[i].buddy[1].word));
 			}
 
-			// FIXME should we check FD??
 			int ret = ioctl(FD, FAKE_BLK_IOC_FLIP_COPY_BITMAP, (void *)fake_ioc);
 			if (ret != 0) {
 				printf("%s ERROR! ioctl(FAKE_BLK_IOC_COPY_PAGE) failed!\n%s", "\033[0;31m", "\033[0m");
@@ -1367,6 +1364,13 @@ void allocator_init(volume_descriptor *volume_desc)
 	volume_desc->hits = 0;
 	volume_desc->free_ops = 0;
 	volume_desc->log_size = FREE_LOG_SIZE_IN_BLOCKS * 4096;
+	struct superblock *b = (struct superblock *)MAPPED;
+	if (b->magic_number != MAGIC_NUMBER) {
+		log_fatal("This volume %s does not seem to contain a valid instance. Issue "
+			  "mkfs command and retry",
+			  volume_desc->volume_id);
+		exit(EXIT_FAILURE);
+	}
 	return;
 }
 
@@ -1458,7 +1462,6 @@ static void clean_log_entries(void *v_desc)
 	//ioctl
 	int fake_blk = 0;
 	uint64_t free_ops = 0;
-	uint64_t bit_idx;
 	/*single thread, per volume so we don't need locking*/
 	int ret = ioctl(FD, FAKE_BLK_IOC_TEST_CAP);
 	if (ret == 0) /*success*/
@@ -1491,9 +1494,6 @@ static void clean_log_entries(void *v_desc)
 			}
 		}
 
-		struct fake_blk_pages_num cbits;
-		cbits.num = 0;
-
 		while (volume_desc->mem_catalogue->free_log_last_free < volume_desc->mem_catalogue->free_log_position) {
 			MUTEX_LOCK(&volume_desc->free_log_lock);
 			uint64_t free_entry_offt = volume_desc->mem_catalogue->free_log_last_free % free_log_size;
@@ -1519,33 +1519,26 @@ static void clean_log_entries(void *v_desc)
 			MUTEX_LOCK(&volume_desc->bitmap_lock);
 			for (uint64_t L = 0; L < fp->length; L += DEVICE_BLOCK_SIZE) {
 				void *addr = (void *)(MAPPED + fp->dev_offt + L);
-
 				bitmap_mark_block_free(volume_desc, addr);
+			}
 
-				if (fake_blk) {
-					uint32_t pagenum = (uint64_t)addr / 4096;
-					uint32_t ii;
-					for (ii = 0; ii < pagenum; ii++) {
-						bit_idx = ((uint64_t)addr - MAPPED) / DEVICE_BLOCK_SIZE;
-						cbits.blocks[cbits.num++] = bit_idx + ii;
-						//if (cbits.num == 511)//now we should issue the ioctl
-						//{
-						//ret =	ioctl(FD, FAKE_BLK_IOC_ZERO_PAGES,&cbits);
-						//if(ret != 0)
-						//{
-						//fprintf(stderr, "ERROR! %s:%s():%d\n",__FILE__, __func__, __LINE__);
-						//exit(EXIT_FAILURE);
-						//}
-						//cbits.num = 0;
-						//}
-					}
-					ioctl(FD, FAKE_BLK_IOC_ZERO_PAGES, &cbits);
-					memset(cbits.blocks, 0x00, 511 * sizeof(uint64_t));
-					cbits.num = 0;
+			//struct fake_blk_pages_num cbits;
+			if (fake_blk) {
+				struct fake_blk_page_range free_op;
+				free_op.offset = fp->dev_offt / DEVICE_BLOCK_SIZE;
+				free_op.length = fp->length / DEVICE_BLOCK_SIZE;
+				ret = ioctl(FD, FAKE_BLK_IOC_ZERO_RANGE, &free_op);
+				if (ret) {
+					log_fatal(
+						"Failed to update Fastmap's bitmap in free operation ret = %d offset %llu length %llu",
+						ret, free_op.offset, free_op.length);
+					log_fatal("Free log pos was: %llu last free %llu",
+						  volume_desc->mem_catalogue->free_log_position,
+						  volume_desc->mem_catalogue->free_log_last_free);
+					exit(EXIT_FAILURE);
 				}
 			}
 			MUTEX_UNLOCK(&volume_desc->bitmap_lock);
-
 			volume_desc->mem_catalogue->free_log_last_free += sizeof(struct free_op_entry);
 			MUTEX_UNLOCK(&volume_desc->free_log_lock);
 		}

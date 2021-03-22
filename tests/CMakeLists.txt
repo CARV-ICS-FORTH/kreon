@@ -10,3 +10,6 @@ target_link_libraries(test_scans kreon)
 
 add_executable(test_allocator test_allocator.c)
 target_link_libraries(test_allocator kreon)
+
+add_executable(test_fmap test_fmap.c)
+target_link_libraries(test_fmap kreon)

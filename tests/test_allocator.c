@@ -1,3 +1,17 @@
+
+// Copyright [2020] [FORTH-ICS]
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdint.h>
@@ -21,10 +35,18 @@ static struct volume_descriptor *open_volume(char *volumeName)
 		digits = 1;
 
 	char *key = calloc(1, strlen(volumeName) + digits + 1);
+	if (!key) {
+		log_fatal("Calloc failed");
+		exit(EXIT_FAILURE);
+	}
 	strcpy(key, volumeName);
 	sprintf(key + strlen(volumeName), "%llu", (LLU)0);
 	key[strlen(volumeName) + digits] = '\0';
 	struct volume_descriptor *volume_desc = calloc(1, sizeof(volume_descriptor));
+	if (!volume_desc) {
+		log_fatal("Calloc failed");
+		exit(EXIT_FAILURE);
+	}
 	volume_desc->state = VOLUME_IS_OPEN;
 	volume_desc->snap_preemption = SNAP_INTERRUPT_DISABLE;
 	volume_desc->last_snapshot = get_timestamp();
@@ -32,6 +54,10 @@ static struct volume_descriptor *open_volume(char *volumeName)
 	volume_desc->last_sync = get_timestamp();
 
 	volume_desc->volume_name = calloc(1, strlen(volumeName) + 1);
+	if (!volume_desc->volume_name) {
+		log_fatal("Calloc failed");
+		exit(EXIT_FAILURE);
+	}
 	strcpy(volume_desc->volume_name, volumeName);
 	volume_desc->volume_id = malloc(strlen(key) + 1);
 	strcpy(volume_desc->volume_id, key);
@@ -47,7 +73,7 @@ static struct volume_descriptor *open_volume(char *volumeName)
 	return volume_desc;
 }
 
-void free_device(struct volume_descriptor *volume_desc, uint64_t capacity)
+static void free_device(struct volume_descriptor *volume_desc, uint64_t capacity)
 {
 	uint64_t bytes_freed = 0;
 	uint64_t num_free_ops = 0;
