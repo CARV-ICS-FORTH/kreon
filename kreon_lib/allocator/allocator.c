@@ -338,9 +338,9 @@ int32_t volume_init(char *dev_name, int64_t start, int64_t size, int typeOfVolum
 	};
 	struct bitmap_bit *bits = (struct bitmap_bit *)(buffer + sizeof(uint64_t));
 	int total_bitmap_bits = (SEGMENT_SIZE + pad) / DEVICE_BLOCK_SIZE;
-	for (int i = 0; i < total_bitmap_bits; i++) {
-		int mod_pos = i / BITS_PER_BYTE;
-		int mode = i % BITS_PER_BYTE;
+	for (int ii = 0; ii < total_bitmap_bits; ii++) {
+		int mod_pos = ii / BITS_PER_BYTE;
+		int mode = ii % BITS_PER_BYTE;
 		switch (mode) {
 		case 0:
 			bits[mod_pos].b0 = 0;
@@ -558,7 +558,7 @@ static inline void *next_word(volume_descriptor *volume_desc, unsigned char op_c
 	next_addr = (void *)((uint64_t)next_addr - (uint64_t)volume_desc->bitmap_start); /*normalize address*/
 	pos = (uint64_t)next_addr % 8192;
 
-	if (pos >= 0 && pos < 8) // reached end of right buddy give it another 8 - translate
+	if (pos < 8) // reached end of right buddy give it another 8 - translate
 		next_addr += 8;
 	else if (pos >= 4096 && pos < 4104) // crossed to the right buddy
 		next_addr += 4104;
@@ -1430,8 +1430,8 @@ exit(EXIT_FAILURE);
 		/* pthread_mutex_unlock(&(volume_desc->mutex));/\*unlock, to go to sleep*\/
 */
 		/*snapshot check*/
-		uint64_t ts = get_timestamp();
-		if ((ts - volume_desc->last_snapshot) >= SNAPSHOT_INTERVAL)
+		uint64_t timestamp = get_timestamp();
+		if ((timestamp - volume_desc->last_snapshot) >= SNAPSHOT_INTERVAL)
 			snapshot(volume_desc);
 		//else if (ts - volume_desc->last_commit > COMMIT_KV_LOG_INTERVAL)
 		//commit_db_logs_per_volume(volume_desc);

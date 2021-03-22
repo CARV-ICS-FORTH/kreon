@@ -146,45 +146,45 @@ void snapshot(volume_descriptor *volume_desc)
 			strcpy(db_entry->db_name, db_desc->db_name);
 			//log_info("pr db entry name %s db name %s", db_entry->db_name, db_desc->db_name);
 
-			for (int level_id = 1; level_id < MAX_LEVELS; level_id++) {
+			for (int levelid = 1; levelid < MAX_LEVELS; levelid++) {
 				for (int tree_id = 0; tree_id < NUM_TREES_PER_LEVEL; tree_id++) {
 					/*Serialize and persist space allocation info for all levels*/
-					if (db_desc->levels[level_id].last_segment[tree_id] != NULL) {
-						db_entry->first_segment[level_id][tree_id] =
-							(uint64_t)db_desc->levels[level_id].first_segment[tree_id] -
+					if (db_desc->levels[levelid].last_segment[tree_id] != NULL) {
+						db_entry->first_segment[levelid][tree_id] =
+							(uint64_t)db_desc->levels[levelid].first_segment[tree_id] -
 							MAPPED;
-						db_entry->last_segment[level_id][tree_id] =
-							(uint64_t)db_desc->levels[level_id].last_segment[tree_id] -
+						db_entry->last_segment[levelid][tree_id] =
+							(uint64_t)db_desc->levels[levelid].last_segment[tree_id] -
 							MAPPED;
-						db_entry->offset[level_id][tree_id] =
-							(uint64_t)db_desc->levels[level_id].offset[tree_id];
+						db_entry->offset[levelid][tree_id] =
+							(uint64_t)db_desc->levels[levelid].offset[tree_id];
 					} else {
-						db_entry->first_segment[level_id][tree_id] = 0;
-						db_entry->last_segment[level_id][tree_id] = 0;
-						db_entry->offset[level_id][tree_id] = 0;
+						db_entry->first_segment[levelid][tree_id] = 0;
+						db_entry->last_segment[levelid][tree_id] = 0;
+						db_entry->offset[levelid][tree_id] = 0;
 					}
 
 					/*now mark new roots*/
-					if (db_desc->levels[level_id].root_w[tree_id] != NULL) {
-						db_entry->root_r[level_id][tree_id] =
-							((uint64_t)db_desc->levels[level_id].root_w[tree_id]) - MAPPED;
+					if (db_desc->levels[levelid].root_w[tree_id] != NULL) {
+						db_entry->root_r[levelid][tree_id] =
+							((uint64_t)db_desc->levels[levelid].root_w[tree_id]) - MAPPED;
 
 						/*mark old root to free it later*/
 						//old_root = db_desc->levels[i].root_r[j];
-						db_desc->levels[level_id].root_r[tree_id] =
-							db_desc->levels[level_id].root_w[tree_id];
-						db_desc->levels[level_id].root_w[tree_id] = NULL;
-					} else if (db_desc->levels[level_id].root_r[tree_id] != NULL) {
+						db_desc->levels[levelid].root_r[tree_id] =
+							db_desc->levels[levelid].root_w[tree_id];
+						db_desc->levels[levelid].root_w[tree_id] = NULL;
+					} else if (db_desc->levels[levelid].root_r[tree_id] != NULL) {
 						//log_warn("set %lu to %llu of db_entry %llu", i * j,
 						//	 db_entry->root_r[(i * MAX_LEVELS) + j], (uint64_t)db_entry - MAPPED);
-						db_entry->root_r[level_id][tree_id] =
-							((uint64_t)db_desc->levels[level_id].root_r[tree_id]) - MAPPED;
+						db_entry->root_r[levelid][tree_id] =
+							((uint64_t)db_desc->levels[levelid].root_r[tree_id]) - MAPPED;
 					} else {
-						db_entry->root_r[level_id][tree_id] = 0;
+						db_entry->root_r[levelid][tree_id] = 0;
 					}
 
-					db_entry->level_size[level_id][tree_id] =
-						db_desc->levels[level_id].level_size[tree_id];
+					db_entry->level_size[levelid][tree_id] =
+						db_desc->levels[levelid].level_size[tree_id];
 				}
 			}
 			/*KV log status*/
@@ -264,10 +264,13 @@ void snapshot(volume_descriptor *volume_desc)
 			switch (errno) {
 			case EBUSY:
 				log_error("msync returned EBUSY");
+				break;
 			case EINVAL:
 				log_error("msync returned EINVAL");
+				break;
 			case ENOMEM:
 				log_error("msync returned EBUSY");
+				break;
 			}
 			exit(EXIT_FAILURE);
 		}
@@ -288,7 +291,7 @@ void snapshot(volume_descriptor *volume_desc)
 		//#else
 		//		SPIN_UNLOCK(&db_desc->lock_log);
 		//#endif
-		for (int level_id = 0; level_id < MAX_LEVELS; level_id++)
+		for (level_id = 0; level_id < MAX_LEVELS; level_id++)
 			RWLOCK_UNLOCK(&db_desc->levels[level_id].guard_of_level.rx_lock);
 
 		node = node->next;

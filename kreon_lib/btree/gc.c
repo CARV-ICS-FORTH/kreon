@@ -49,7 +49,7 @@ void move_kv_pairs_to_new_segment(volume_descriptor *volume_desc, db_descriptor 
 	}
 }
 
-int8_t find_deleted_kv_pairs_in_segment(volume_descriptor *volume_desc, db_descriptor *db_desc, char *log_segment,
+int8_t find_deleted_kv_pairs_in_segment(volume_descriptor *volume_desc, db_descriptor *db_desc, char *logsegment,
 					stack *marks)
 {
 	struct db_handle handle = { .volume_desc = volume_desc, .db_desc = db_desc };
@@ -57,22 +57,22 @@ int8_t find_deleted_kv_pairs_in_segment(volume_descriptor *volume_desc, db_descr
 	struct value_format *value;
 	void *value_as_pointer;
 	void *find_value;
-	char *start_of_log_segment = log_segment;
+	char *start_of_log_segment = logsegment;
 	uint64_t size_of_log_segment_checked = 0;
 	uint64_t log_data_without_metadata = LOG_DATA_OFFSET;
 	uint64_t remaining_space;
 	int key_value_size;
 	int garbage_collect_segment = 0;
 
-	key = (struct kv_format *)log_segment;
+	key = (struct kv_format *)logsegment;
 	key_value_size = sizeof(key->key_size) * 2;
 	marks->size = 0;
-	remaining_space = LOG_DATA_OFFSET - (uint64_t)(log_segment - start_of_log_segment);
+	remaining_space = LOG_DATA_OFFSET - (uint64_t)(logsegment - start_of_log_segment);
 
 	while (size_of_log_segment_checked < log_data_without_metadata && key->key_size != 0 && remaining_space >= 10) {
-		key = (struct kv_format *)log_segment;
-		value = (struct value_format *)(log_segment + VALUE_SIZE_OFFSET(key->key_size));
-		value_as_pointer = (log_segment + VALUE_SIZE_OFFSET(key->key_size));
+		key = (struct kv_format *)logsegment;
+		value = (struct value_format *)(logsegment + VALUE_SIZE_OFFSET(key->key_size));
+		value_as_pointer = (logsegment + VALUE_SIZE_OFFSET(key->key_size));
 		find_value = find_key(&handle, key->key_buf, key->key_size);
 
 		if (key->key_size != 0 && remaining_space >= 10 &&
@@ -80,13 +80,13 @@ int8_t find_deleted_kv_pairs_in_segment(volume_descriptor *volume_desc, db_descr
 			garbage_collect_segment = 1;
 		} else if (key->key_size != 0 && remaining_space >= 10 &&
 			   (find_value != NULL && value_as_pointer == find_value)) {
-			push_stack(marks, log_segment);
+			push_stack(marks, logsegment);
 		}
 
 		if (key->key_size != 0 && remaining_space >= 10) {
-			log_segment += key->key_size + value->value_size + key_value_size;
+			logsegment += key->key_size + value->value_size + key_value_size;
 			size_of_log_segment_checked += key->key_size + value->value_size + key_value_size;
-			remaining_space = LOG_DATA_OFFSET - (uint64_t)(log_segment - start_of_log_segment);
+			remaining_space = LOG_DATA_OFFSET - (uint64_t)(logsegment - start_of_log_segment);
 		} else
 			break;
 	}

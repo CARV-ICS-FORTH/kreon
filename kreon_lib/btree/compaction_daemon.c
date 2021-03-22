@@ -753,8 +753,8 @@ void *compaction_daemon(void *args)
 
 		// rest of levels
 		for (int level_id = 1; level_id < MAX_LEVELS - 1; ++level_id) {
-			struct level_descriptor *level_1 = &handle->db_desc->levels[level_id];
-			struct level_descriptor *level_2 = &handle->db_desc->levels[level_id + 1];
+			struct level_descriptor *l1 = &handle->db_desc->levels[level_id];
+			struct level_descriptor *l2 = &handle->db_desc->levels[level_id + 1];
 			uint8_t tree_1 = 0; // level_1->active_tree;
 			uint8_t tree_2 = 0; // level_2->active_tree;
 
@@ -764,14 +764,13 @@ void *compaction_daemon(void *args)
 			//+ 1, tree_2,
 			//	 level_2->level_size[tree_2]);
 			// log_info("level status = %u", level_1->tree_status[tree_1]);
-			if (level_1->tree_status[tree_1] == NO_SPILLING &&
-			    level_1->level_size[tree_1] >= level_1->max_level_size) {
+			if (l1->tree_status[tree_1] == NO_SPILLING && l1->level_size[tree_1] >= l1->max_level_size) {
 				// log_info("Level %u is F U L L", level_id);
 				// src ready is destination ok?
-				if (level_2->tree_status[tree_2] == NO_SPILLING &&
-				    level_2->level_size[tree_2] < level_2->max_level_size) {
-					level_1->tree_status[tree_1] = SPILLING_IN_PROGRESS;
-					level_2->tree_status[tree_2] = SPILLING_IN_PROGRESS;
+				if (l2->tree_status[tree_2] == NO_SPILLING &&
+				    l2->level_size[tree_2] < l2->max_level_size) {
+					l1->tree_status[tree_1] = SPILLING_IN_PROGRESS;
+					l2->tree_status[tree_2] = SPILLING_IN_PROGRESS;
 					/*start a compaction*/
 					struct compaction_request *comp_req_p =
 						(struct compaction_request *)malloc(sizeof(struct compaction_request));

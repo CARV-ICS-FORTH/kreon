@@ -4,3 +4,5 @@ build/
 *.so*
 *.bin
 *.gitlab-ci-local
+*.ccls-cache
+compile_commands.json
