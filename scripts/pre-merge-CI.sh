@@ -2,7 +2,7 @@
 set -e
 # pip install gitlint
 # FILES=$(git --no-pager diff "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" --name-only)
-FILES=$(git diff --name-only origin/"$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME" origin/"$CI_MERGE_REQUEST_TARGET_BRANCH_NAME")
+FILES=$(git --no-pager diff "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" --name-only)
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 NC='\033[0m'
