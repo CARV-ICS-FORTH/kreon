@@ -121,11 +121,15 @@ struct fake_blk_page_num {
 	__u64 num;
 } __attribute__((packed));
 
+/*Instruct fastmap that blockids from 0 to num
+ * are now free*/
 struct fake_blk_pages_num {
 	__u64 blocks[511]; /* in order to be 4Kb */
 	__u64 num;
 } __attribute__((packed));
 
+/*Instruct fastmap that Block id offset and in
+ * block id length is now free*/
 struct fake_blk_page_range {
 	__u64 offset;
 	__u64 length;

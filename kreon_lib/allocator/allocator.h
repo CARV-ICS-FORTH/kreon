@@ -33,7 +33,8 @@
 #include "../utilities/spin_loop.h"
 #include "../btree/conf.h"
 #define MAGIC_NUMBER 2036000000
-#define FREE_BLOCK 124
+/*size in 4KB blocks of the log used for marking the free ops*/
+#define FREE_LOG_SIZE_IN_BLOCKS 512000
 
 typedef enum volume_state { VOLUME_IS_OPEN = 0x00, VOLUME_IS_CLOSING = 0x01, VOLUME_IS_CLOSED = 0x02 } volume_state;
 
@@ -65,8 +66,6 @@ typedef enum volume_state { VOLUME_IS_OPEN = 0x00, VOLUME_IS_CLOSING = 0x01, VOL
 
 #define SNAP_INTERRUPT_ENABLE 0x0A
 #define SNAP_INTERRUPT_DISABLE 0x0B
-
-extern LIST *mappedVolumes;
 
 /*the global mountpoint of a volume*/
 extern uint64_t MAPPED;
@@ -138,10 +137,38 @@ typedef struct superblock {
 	char pad[4048];
 } superblock;
 
+#define WORDS_PER_BITMAP_BUDDY ((DEVICE_BLOCK_SIZE / sizeof(uint64_t)) - 1)
+struct bitmap_buddy {
+	uint64_t epoch;
+	uint64_t word[WORDS_PER_BITMAP_BUDDY];
+};
+
+struct bitmap_buddy_pair {
+	struct bitmap_buddy buddy[2];
+};
+
+struct bitmap_position {
+	int buddy_pair;
+	int word_id;
+};
+
+#define BITMAP_BUDDY_PAIRS_PER_CELL 4
+struct bitmap_buddies_cell {
+	uint8_t b0 : 2;
+	uint8_t b1 : 2;
+	uint8_t b2 : 2;
+	uint8_t b3 : 2;
+};
+
+struct bitmap_buddies_state {
+	uint32_t size;
+	struct bitmap_buddies_cell buddy[];
+};
+
 typedef struct volume_descriptor {
-	/*dirty version on the device of the volume's db catalogue*/
+	//dirty version on the device of the volume's db catalogue
 	pr_system_catalogue *mem_catalogue;
-	/*location in the volume where superindex is */
+	//location in the volume where superindex is
 	pr_system_catalogue *dev_catalogue;
 	pthread_t log_cleaner; /* handle for the log cleaner thread. 1 cleaner per volume */
 	pthread_cond_t cond; /* conditional wait, used for cleaner*/
@@ -149,14 +176,14 @@ typedef struct volume_descriptor {
 	pthread_mutex_t gc_mutex; /* mutex, used for garbage collection thread */
 	pthread_cond_t gc_cond; /* conditional wait, used for garbage collection thread*/
 
-	pthread_mutex_t FREE_LOG_LOCK; /*lock used for protecting adding entries to the free log of the allocator*/
-	pthread_mutex_t allocator_lock; /* lock used for threads allocating space in the same volume */
+	pthread_mutex_t free_log_lock; /*lock used for protecting adding entries to the free log of the allocator*/
+	pthread_mutex_t bitmap_lock; /* lock used for threads allocating space in the same volume */
 	uint64_t last_snapshot; /* timestamp of when last snapshot took place*/
 	uint64_t last_commit;
 	uint64_t last_sync; /*latest sync timestamp*/
 	char *volume_id; /* name of the volume's id, dynamically allocated */
 	char *volume_name; /*name of the volume without the id*/
-	void *start_addr; /*starting addr of the specific Eugenea partition*/
+	void *start_addr;
 	uint64_t offset;
 	uint64_t size; /* size of volume in bytes */
 	void *bitmap_start; /* address of where volume's bitmap starts*/
@@ -169,22 +196,26 @@ typedef struct volume_descriptor {
 	* 10 read right/write left
 	* 11 read right/write right
 	*/
-	unsigned char *allocator_state;
-	unsigned char *sync_signal; /* used for efficient snapshot*/
+	struct bitmap_buddies_state *buddies_vector;
+
 	superblock *volume_superblock; /*address of volume's superblock*/
-	LIST *open_databases;
-	/*<log_size for free ops start and end>*/
+	struct klist *open_databases;
+
+	/*free log start*/
 	uint64_t log_size;
 	uint64_t start;
 	uint64_t end;
-	/*</log_size for free ops start and end>*/
-	void *latest_addr; /* location, where the last allocation took place */
-	uint32_t full; /* value is set to 2 after a non-successfull allocation operation for a given size.*/
-	uint64_t max_suffix; /*After a non successfull allocation op, this value is set to max_suffix found.
-			      This is used for indicating to future allocation operations if they should search
-			      a given bitmap-zone or not.*/
-	uint16_t *segment_utilization_vector;
-	uint64_t segment_utilization_vector_size;
+	/*free log end*/
+	/*Location of last allocation*/
+	struct bitmap_position b_pos;
+	/* value is set to 2 after a non-successfull allocation operation for a given size.*/
+	uint32_t full;
+	/*After a non successfull allocation op, this value is set to max_suffix found.
+	 This is used for indicating to future allocation operations if they should search
+	 a given bitmap-zone or not.*/
+	uint64_t max_suffix;
+	//uint16_t *segment_utilization_vector;
+	//uint64_t segment_utilization_vector_size;
 	/*<stats counters>*/
 	uint64_t collisions;
 	uint64_t hits;
@@ -192,9 +223,9 @@ typedef struct volume_descriptor {
 	/*</stats counters>*/
 	int32_t reference_count;
 	int32_t allocator_size;
-	int32_t fd; /* volume file descriptor */
 	volatile char state; /*used for signaling log cleaner when volume is closing*/
 	volatile char snap_preemption;
+	char force_snapshot;
 } volume_descriptor;
 
 /*
@@ -206,18 +237,18 @@ typedef struct volume_descriptor {
  * @return >= 0 in case of success. < 0 otherwise.
  */
 
+struct volume_descriptor *get_volume_desc(char *volume_name, uint64_t start_offt, char create);
 int32_t volume_init(char *dev_name, int64_t start, int64_t size, int typeOfVolume);
 
-void destoy_db_list_node(NODE *node);
-void destroy_volume_node(NODE *node);
+void force_snapshot(volume_descriptor *volume_desc);
+void snapshot(volume_descriptor *volume_desc);
 
 void allocator_init(volume_descriptor *volume_desc);
-void mark_block(volume_descriptor *, void *, uint32_t, char, uint64_t *);
 
 void set_priority(uint64_t pageno, char allocation_code, uint64_t num_bytes);
-void *allocate(void *_volume_desc, uint64_t num_bytes, int extensions, char allocation_code);
-void *allocate_segment(void *_handle, uint64_t num_bytes, int level_id, char allocation_code);
+void *allocate(struct volume_descriptor *volume_desc, uint64_t num_bytes, int extensions, char allocation_code);
 
 void free_block(struct volume_descriptor *volume_desc, void *address, uint32_t length);
+void bitmap_set_buddies_immutable(struct volume_descriptor *volume_desc);
 
 uint64_t get_timestamp(void);

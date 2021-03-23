@@ -55,8 +55,8 @@
 
 #define FAILURE 0
 
-int32_t leaf_order;
-int32_t index_order;
+int32_t leaf_order = -1;
+int32_t index_order = -1;
 /*stats counters*/
 extern uint64_t internal_tree_cow_for_leaf;
 extern uint64_t internal_tree_cow_for_index;
@@ -593,6 +593,10 @@ static void bt_reclaim_db_space(struct db_descriptor *db_desc, struct volume_des
 
 static void bt_reclaim_volume_space(struct volume_descriptor *volume_desc)
 {
+	if (volume_desc->mem_catalogue == NULL) {
+		log_fatal("Null mem_catalogue");
+		exit(EXIT_FAILURE);
+	}
 	for (int i = 0; i < NUM_OF_DB_GROUPS; i++) {
 		if (volume_desc->mem_catalogue->db_group_index[i] != 0) {
 			struct pr_db_group *db_group =
@@ -668,21 +672,13 @@ db_handle *db_open(char *volumeName, uint64_t start, uint64_t size2, char *db_na
 {
 	(void)size2;
 	db_handle *handle;
-	volume_descriptor *volume_desc;
-	db_descriptor *db_desc;
-	char *key;
-	uint64_t val;
-	int i = 0;
-	int digits;
 	uint8_t level_id, tree_id;
 
 	fprintf(stderr, "\n%s[%s:%s:%d](\"%s\", %" PRIu64 ", %s);%s\n", "\033[0;32m", __FILE__, __func__, __LINE__,
 		volumeName, start, db_name, "\033[0m");
 
 	MUTEX_LOCK(&init_lock);
-
-	if (mappedVolumes == NULL) {
-		mappedVolumes = init_list(&destroy_volume_node);
+	if (leaf_order == -1) {
 		/*calculate max leaf,index order*/
 		leaf_order = (LEAF_NODE_SIZE - sizeof(node_header)) / (sizeof(uint64_t) + PREFIX_SIZE);
 		while (leaf_order % 2 != 0)
@@ -706,79 +702,23 @@ db_handle *db_open(char *volumeName, uint64_t start, uint64_t size2, char *db_na
 		//	 "node_header = %lu",
 		//	 index_order, leaf_order, sizeof(node_header));
 	}
-	//Is requested volume already mapped?, construct key which will be
-	//volumeName|start
-	val = start;
-	digits = 0;
-	while (val > 0) {
-		val = val / 10;
-		digits++;
-	}
-	if (digits == 0)
-		digits = 1;
 
-	key = calloc(1, strlen(volumeName) + digits + 1);
-	strcpy(key, volumeName);
-	sprintf(key + strlen(volumeName), "%llu", (LLU)start);
-	key[strlen(volumeName) + digits] = '\0';
-	volume_desc = (volume_descriptor *)find_element(mappedVolumes, key);
-
+	struct volume_descriptor *volume_desc = get_volume_desc(volumeName, start, 0);
 	if (volume_desc == NULL) {
-		volume_desc = calloc(1, sizeof(volume_descriptor));
-		volume_desc->state = VOLUME_IS_OPEN;
-		volume_desc->snap_preemption = SNAP_INTERRUPT_DISABLE;
-		volume_desc->last_snapshot = get_timestamp();
-		volume_desc->last_commit = get_timestamp();
-		volume_desc->last_sync = get_timestamp();
-
-		volume_desc->volume_name = calloc(1, strlen(volumeName) + 1);
-		strcpy(volume_desc->volume_name, volumeName);
-		volume_desc->volume_id = malloc(strlen(key) + 1);
-		strcpy(volume_desc->volume_id, key);
-		volume_desc->open_databases = init_list(&destoy_db_list_node);
-		volume_desc->offset = start;
-		/*allocator lock*/
-		MUTEX_INIT(&(volume_desc->allocator_lock), NULL);
-		/*free operations log*/
-		MUTEX_INIT(&(volume_desc->FREE_LOG_LOCK), NULL);
-		//this call will fill volume's size
-		allocator_init(volume_desc);
-		add_first(mappedVolumes, volume_desc, key);
-		volume_desc->reference_count++;
-		//soft state about the in use pages of level-0 for each SEGMENT_SIZE
-		//segment inside the volume
-		volume_desc->segment_utilization_vector_size =
-			((volume_desc->volume_superblock->dev_size_in_blocks -
-			  (1 + FREE_LOG_SIZE + volume_desc->volume_superblock->bitmap_size_in_blocks)) /
-			 (SEGMENT_SIZE / DEVICE_BLOCK_SIZE)) *
-			2;
-		volume_desc->segment_utilization_vector =
-			(uint16_t *)malloc(volume_desc->segment_utilization_vector_size);
-		if (volume_desc->segment_utilization_vector == NULL) {
-			log_fatal("failed to allocate memory for segment utilization vector of "
-				  "size %lu",
-				  volume_desc->segment_utilization_vector_size);
-			exit(EXIT_FAILURE);
-		}
-		memset(volume_desc->segment_utilization_vector, 0x00, volume_desc->segment_utilization_vector_size);
-		log_info("Open volume %s successfully", volume_desc->volume_name);
+		volume_desc = get_volume_desc(volumeName, start, 1);
 		bt_reclaim_volume_space(volume_desc);
-	} else {
-		//log_info("Volume already mapped");
-		volume_desc->reference_count++;
 	}
 	/*Before searching the actual volume's catalogue take a look at the current
 * open databases*/
-	db_desc = find_element(volume_desc->open_databases, db_name);
+	struct db_descriptor *db_desc = klist_find_element_with_key(volume_desc->open_databases, db_name);
 	if (db_desc != NULL) {
-		log_info("DB %s already open in volume %s", db_name, key);
+		log_info("DB %s already open in volume %s", db_name, volumeName);
 		handle = malloc(sizeof(db_handle));
 		memset(handle, 0x00, sizeof(db_handle));
 		handle->volume_desc = volume_desc;
 		handle->db_desc = db_desc;
 		db_desc->ref_count++;
 		MUTEX_UNLOCK(&init_lock);
-		free(key);
 		return handle;
 	} else {
 		pr_db_group *db_group;
@@ -792,7 +732,7 @@ db_handle *db_open(char *volumeName, uint64_t start, uint64_t size2, char *db_na
 		empty_index = -1;
 		//we are going to search system's catalogue to find the root_r of the
 		//corresponding database
-		for (i = 0; i < NUM_OF_DB_GROUPS; i++) {
+		for (int i = 0; i < NUM_OF_DB_GROUPS; i++) {
 			/*is group empty?*/
 			if (volume_desc->mem_catalogue->db_group_index[i] != 0) {
 				db_group = (pr_db_group *)(MAPPED +
@@ -843,7 +783,7 @@ db_handle *db_open(char *volumeName, uint64_t start, uint64_t size2, char *db_na
 		// log_info("mem epoch %llu", volume_desc->mem_catalogue->epoch);
 		if (empty_index == -1) {
 			/*space found in empty group*/
-			pr_db_group *new_group = get_space_for_system(volume_desc, sizeof(pr_db_group));
+			pr_db_group *new_group = get_space_for_system(volume_desc, sizeof(pr_db_group), 1);
 			memset(new_group, 0x00, sizeof(pr_db_group));
 			new_group->epoch = volume_desc->mem_catalogue->epoch;
 			volume_desc->mem_catalogue->db_group_index[empty_group] =
@@ -928,10 +868,9 @@ finish_init:
 			a++;
 	}
 
-	add_first(volume_desc->open_databases, db_desc, db_name);
+	klist_add_first(volume_desc->open_databases, db_desc, db_name, NULL);
 	bt_recover_L0(handle);
 	MUTEX_UNLOCK(&init_lock);
-	free(key);
 
 	return handle;
 }
@@ -940,7 +879,7 @@ char db_close(db_handle *handle)
 {
 	MUTEX_LOCK(&init_lock);
 	/*verify that this is a valid db*/
-	if (find_element(handle->volume_desc->open_databases, handle->db_desc->db_name) == NULL) {
+	if (klist_find_element_with_key(handle->volume_desc->open_databases, handle->db_desc->db_name) == NULL) {
 		log_warn("Received close for db: %s that is not listed as open", handle->db_desc->db_name);
 		goto finish;
 	}
@@ -982,6 +921,11 @@ char db_close(db_handle *handle)
 	log_info("All pending compactions done for db %s", handle->db_desc->db_name);
 	snapshot(handle->volume_desc);
 
+	if (!klist_remove_element(handle->volume_desc->open_databases, handle->db_desc)) {
+		log_fatal("Failed to remove db_desc of DB %s", handle->db_desc->db_name);
+		exit(EXIT_FAILURE);
+	}
+
 	//free L0
 	for (int tree_id = 0; tree_id < NUM_TREES_PER_LEVEL; ++tree_id) {
 		if (RWLOCK_WRLOCK(&handle->db_desc->levels[0].guard_of_level.rx_lock)) {
@@ -991,11 +935,6 @@ char db_close(db_handle *handle)
 		if (RWLOCK_UNLOCK(&handle->db_desc->levels[0].guard_of_level.rx_lock)) {
 			exit(EXIT_FAILURE);
 		}
-	}
-
-	if (remove_element(handle->volume_desc->open_databases, handle->db_desc) != 1) {
-		log_fatal("Could not find db: %s", handle->db_desc->db_name);
-		exit(EXIT_FAILURE);
 	}
 
 	for (int i = 0; i < MAX_LEVELS; i++) {
@@ -1017,6 +956,36 @@ finish:
 	free(handle);
 	MUTEX_UNLOCK(&init_lock);
 	return KREON_OK;
+}
+
+void destroy_db_desc(void *handle)
+{
+	struct db_handle *hd = (struct db_handle *)handle;
+	//free L0
+	for (int tree_id = 0; tree_id < NUM_TREES_PER_LEVEL; ++tree_id) {
+		if (RWLOCK_WRLOCK(&hd->db_desc->levels[0].guard_of_level.rx_lock)) {
+			exit(EXIT_FAILURE);
+		}
+		seg_free_level(handle, 0, tree_id);
+		if (RWLOCK_UNLOCK(&hd->db_desc->levels[0].guard_of_level.rx_lock)) {
+			exit(EXIT_FAILURE);
+		}
+	}
+
+	for (int i = 0; i < MAX_LEVELS; i++) {
+		if (pthread_rwlock_destroy(&hd->db_desc->levels[i].guard_of_level.rx_lock)) {
+			log_fatal("Failed to destroy guard of level lock");
+			exit(EXIT_FAILURE);
+		}
+		destroy_level_locktable(hd->db_desc, i);
+	}
+	//memset(handle->db_desc, 0x00, sizeof(struct db_descriptor));
+	if (pthread_cond_destroy(&hd->db_desc->client_barrier) != 0) {
+		log_fatal("Failed to destroy condition variable");
+		perror("pthread_cond_destroy() error");
+		exit(EXIT_FAILURE);
+	}
+	free(hd->db_desc);
 }
 
 enum optype { insert_op, delete_op };
@@ -1167,9 +1136,11 @@ void *append_key_value_to_log(log_operation *req)
 
 		allocated_space = data_size.kv_size + sizeof(segment_header);
 		allocated_space += SEGMENT_SIZE - (allocated_space % SEGMENT_SIZE);
-
 		d_header = seg_get_raw_log_segment(handle->volume_desc);
-		assert(((uint64_t)d_header - MAPPED) % SEGMENT_SIZE == 0);
+		if (((uint64_t)d_header - MAPPED) % SEGMENT_SIZE != 0) {
+			log_fatal("Misalinged allocation d_header offt %llu", (uint64_t)d_header - MAPPED);
+			exit(EXIT_FAILURE);
+		}
 		memset(d_header->garbage_bytes, 0x00, 2 * MAX_COUNTER_VERSIONS * sizeof(uint64_t));
 		d_header->segment_id = handle->db_desc->KV_log_last_segment->segment_id + 1;
 		d_header->next_segment = NULL;

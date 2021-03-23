@@ -88,34 +88,72 @@ void commit_db_logs_per_volume(volume_descriptor *volume_desc)
 }
 #endif
 
-/*persists a consistent snapshot of the system*/
-void snapshot(volume_descriptor *volume_desc)
+/*As normal snapshot except it increases system's epoch
+ * even in the case where no writes have taken place
+ */
+void force_snapshot(volume_descriptor *volume_desc)
 {
-	//struct commit_log_info log_info;
-	pr_db_group *db_group;
-	pr_db_entry *db_entry;
-	//node_header *old_root;
-	uint64_t a, b;
-	uint64_t c;
-	int32_t dirty = 0;
-	uint8_t level_id;
-	int l;
+	volume_desc->force_snapshot = 1;
+	snapshot(volume_desc);
+}
 
-	log_info("Trigerring Snapshot");
-	volume_desc->snap_preemption = SNAP_INTERRUPT_ENABLE;
-	/*1. Acquire all write locks for each database of the specific volume*/
-	NODE *node = get_first(volume_desc->open_databases);
-	db_descriptor *db_desc;
-
+static void stop_readers_writers(struct volume_descriptor *volume_desc)
+{
+	struct klist_node *node = klist_get_first(volume_desc->open_databases);
 	while (node != NULL) {
-		db_desc = (db_descriptor *)(node->data);
+		struct db_descriptor *db_desc = (struct db_descriptor *)(node->data);
 		/*stop all writers clients and compaction threads*/
-		for (level_id = 0; level_id < MAX_LEVELS; level_id++) {
+		for (int level_id = 0; level_id < MAX_LEVELS; level_id++) {
 			RWLOCK_WRLOCK(&db_desc->levels[level_id].guard_of_level.rx_lock);
 			/*spinning*/
 			spin_loop(&(db_desc->levels[level_id].active_writers), 0);
 		}
-		/*all levels locked*/
+		node = node->next;
+	}
+	//all dbs locked
+	//Acquire locks of the cleaner
+	MUTEX_LOCK(&volume_desc->free_log_lock);
+	MUTEX_LOCK(&volume_desc->bitmap_lock);
+}
+
+static void resume_readers_writers(struct volume_descriptor *volume_desc)
+{
+	struct klist_node *node = klist_get_first(volume_desc->open_databases);
+	while (node != NULL) {
+		struct db_descriptor *db_desc = (struct db_descriptor *)(node->data);
+		for (int level_id = 0; level_id < MAX_LEVELS; level_id++) {
+			RWLOCK_UNLOCK(&db_desc->levels[level_id].guard_of_level.rx_lock);
+			spin_loop(&(db_desc->levels[level_id].active_writers), 0);
+		}
+		node = node->next;
+	}
+	//all dbs locked
+	//Acquire locks of the cleaner
+	MUTEX_UNLOCK(&volume_desc->free_log_lock);
+	MUTEX_UNLOCK(&volume_desc->bitmap_lock);
+}
+
+/*persists a consistent snapshot of the system*/
+void snapshot(volume_descriptor *volume_desc)
+{
+	pr_db_group *db_group;
+	pr_db_entry *db_entry;
+	int32_t dirty = 0;
+
+	log_info("Trigerring Snapshot");
+	volume_desc->snap_preemption = SNAP_INTERRUPT_ENABLE;
+
+	stop_readers_writers(volume_desc);
+	if (volume_desc->force_snapshot) {
+		dirty = 1;
+		volume_desc->force_snapshot = 0;
+	}
+
+	//Iterate dbs
+	struct klist_node *node = klist_get_first(volume_desc->open_databases);
+	while (node != NULL) {
+		struct db_descriptor *db_desc = (struct db_descriptor *)node->data;
+
 		dirty += db_desc->dirty;
 		/*update the catalogue if db is dirty*/
 		if (db_desc->dirty > 0) {
@@ -125,18 +163,20 @@ void snapshot(volume_descriptor *volume_desc)
 				(pr_db_group *)(MAPPED +
 						(uint64_t)volume_desc->mem_catalogue->db_group_index[db_desc->group_id]);
 
-			//log_info("group epoch %llu  dev_catalogue %llu", (LLU)db_group->epoch,
+			// log_info("group epoch %llu  dev_catalogue %llu",
+			// (LLU)db_group->epoch,
 			// volume_desc->dev_catalogue->epoch);
 			if (db_group->epoch <= volume_desc->dev_catalogue->epoch) {
-				//log_info("cow for db_group %llu", (LLU)db_group);
+				// log_info("cow for db_group %llu", (LLU)db_group);
 				/*do cow*/
-				//superindex_db_group * new_group = (superindex_db_group *)allocate(volume_desc,DEVICE_BLOCK_SIZE,-1,GROUP_COW);
+				// superindex_db_group * new_group = (superindex_db_group
+				// *)allocate(volume_desc,DEVICE_BLOCK_SIZE,-1,GROUP_COW);
 				pr_db_group *new_group =
-					(pr_db_group *)get_space_for_system(volume_desc, sizeof(pr_db_group));
+					(pr_db_group *)get_space_for_system(volume_desc, sizeof(pr_db_group), 0);
 
 				memcpy(new_group, db_group, sizeof(pr_db_group));
 				new_group->epoch = volume_desc->mem_catalogue->epoch;
-				free_block(volume_desc, db_group, sizeof(pr_db_group));
+				free_system_space(volume_desc, db_group, sizeof(pr_db_group));
 				db_group = new_group;
 				volume_desc->mem_catalogue->db_group_index[db_desc->group_id] =
 					(pr_db_group *)((uint64_t)db_group - MAPPED);
@@ -144,7 +184,8 @@ void snapshot(volume_descriptor *volume_desc)
 
 			db_entry = &(db_group->db_entries[db_desc->group_index]);
 			strcpy(db_entry->db_name, db_desc->db_name);
-			//log_info("pr db entry name %s db name %s", db_entry->db_name, db_desc->db_name);
+			// log_info("pr db entry name %s db name %s", db_entry->db_name,
+			// db_desc->db_name);
 
 			for (int levelid = 1; levelid < MAX_LEVELS; levelid++) {
 				for (int tree_id = 0; tree_id < NUM_TREES_PER_LEVEL; tree_id++) {
@@ -170,13 +211,13 @@ void snapshot(volume_descriptor *volume_desc)
 							((uint64_t)db_desc->levels[levelid].root_w[tree_id]) - MAPPED;
 
 						/*mark old root to free it later*/
-						//old_root = db_desc->levels[i].root_r[j];
 						db_desc->levels[levelid].root_r[tree_id] =
 							db_desc->levels[levelid].root_w[tree_id];
 						db_desc->levels[levelid].root_w[tree_id] = NULL;
 					} else if (db_desc->levels[levelid].root_r[tree_id] != NULL) {
-						//log_warn("set %lu to %llu of db_entry %llu", i * j,
-						//	 db_entry->root_r[(i * MAX_LEVELS) + j], (uint64_t)db_entry - MAPPED);
+						// log_warn("set %lu to %llu of db_entry %llu", i * j,
+						//	 db_entry->root_r[(i * MAX_LEVELS) + j],
+						//(uint64_t)db_entry - MAPPED);
 						db_entry->root_r[levelid][tree_id] =
 							((uint64_t)db_desc->levels[levelid].root_r[tree_id]) - MAPPED;
 					} else {
@@ -214,36 +255,16 @@ void snapshot(volume_descriptor *volume_desc)
 	}
 	if (dirty > 0) {
 		/*At least one db is dirty proceed to snapshot()*/
-		free_block(volume_desc, volume_desc->dev_catalogue, sizeof(pr_system_catalogue));
+		free_system_space(volume_desc, volume_desc->dev_catalogue, sizeof(pr_system_catalogue));
 		volume_desc->dev_catalogue = volume_desc->mem_catalogue;
 		/*allocate a new position for superindex*/
 
 		pr_system_catalogue *tmp =
-			(pr_system_catalogue *)get_space_for_system(volume_desc, sizeof(pr_system_catalogue));
+			(pr_system_catalogue *)get_space_for_system(volume_desc, sizeof(pr_system_catalogue), 0);
 		memcpy(tmp, volume_desc->dev_catalogue, sizeof(pr_system_catalogue));
 		++tmp->epoch;
 		volume_desc->mem_catalogue = tmp;
-
-		/*protect this segment because cleaner may run in parallel */
-		MUTEX_LOCK(&volume_desc->allocator_lock);
-		/*update allocator state, soft state staff */
-		for (l = 0; l < volume_desc->allocator_size; l += 8) {
-			a = *(uint64_t *)((uint64_t)(volume_desc->allocator_state) + l);
-			b = *(uint64_t *)((uint64_t)(volume_desc->sync_signal) + l);
-			c = a ^ b;
-			if ((c - a) != 0) {
-#ifdef DEBUG_SNAPSHOT
-				log_debug("Updating automaton state");
-				log_debug("allocator = %llu ", (LLU)a);
-				log_debug("sync_signal = %llu ", (LLU)b);
-				log_debug("Result = %llu \n", (LLU)c);
-#endif
-				*(uint64_t *)((uint64_t)(volume_desc->allocator_state) + l) = c;
-			}
-		}
-		memset(volume_desc->sync_signal, 0x00, volume_desc->allocator_size);
-		MUTEX_UNLOCK(&volume_desc->allocator_lock);
-		//pthread_mutex_unlock(&(volume_desc->allocator_lock)); /*ok release allocator lock */
+		bitmap_set_buddies_immutable(volume_desc);
 	}
 
 	volume_desc->last_snapshot = get_timestamp(); /*update snapshot ts*/
@@ -252,11 +273,6 @@ void snapshot(volume_descriptor *volume_desc)
 
 	if (dirty > 0) {
 		/*At least one db is dirty proceed to snapshot()*/
-		//double t1,t2;
-		//struct timeval tim;
-
-		//gettimeofday(&tim, NULL);
-		//t1=tim.tv_sec+(tim.tv_usec/1000000.0);
 		log_info("Syncing volume... from %llu to %llu", volume_desc->start_addr, volume_desc->size);
 		if (msync(volume_desc->start_addr, volume_desc->size, MS_SYNC) != 0) {
 			log_fatal("Error at msync start_addr %llu size %llu", (LLU)volume_desc->start_addr,
@@ -274,27 +290,11 @@ void snapshot(volume_descriptor *volume_desc)
 			}
 			exit(EXIT_FAILURE);
 		}
-		//gettimeofday(&tim, NULL);
-		//t2=tim.tv_sec+(tim.tv_usec/1000000.0);
-		//fprintf(stderr, "snap_time=[%lf]sec\n", (t2-t1));
 	}
 	/*Write superblock*/
 	volume_desc->volume_superblock->system_catalogue =
 		(pr_system_catalogue *)((uint64_t)volume_desc->dev_catalogue - MAPPED);
 
-	/*release locks*/
-	node = get_first(volume_desc->open_databases);
-	while (node != NULL) {
-		db_desc = (db_descriptor *)node->data;
-		//#if LOG_WITH_MUTEX
-		//		MUTEX_UNLOCK(&db_desc->lock_log);
-		//#else
-		//		SPIN_UNLOCK(&db_desc->lock_log);
-		//#endif
-		for (level_id = 0; level_id < MAX_LEVELS; level_id++)
-			RWLOCK_UNLOCK(&db_desc->levels[level_id].guard_of_level.rx_lock);
-
-		node = node->next;
-	}
+	resume_readers_writers(volume_desc);
 	volume_desc->snap_preemption = SNAP_INTERRUPT_DISABLE;
 }
