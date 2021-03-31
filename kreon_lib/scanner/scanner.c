@@ -725,7 +725,7 @@ int32_t _get_next_KV(level_scanner *sc)
 
 	return SUCCESS;
 }
-#if 0
+
 int32_t _get_prev_KV(level_scanner *sc)
 {
 	stackElementT stack_top;
@@ -861,7 +861,7 @@ int32_t _get_prev_KV(level_scanner *sc)
 		break;
 	}
 
-	//	printf("<-..%s\n" , sc->key_value.kv + sizeof(uint32_t));
+	//printf("<-..%s\n", sc->key_value.kv + sizeof(uint32_t));
 
 	return SUCCESS;
 }
@@ -980,7 +980,7 @@ int32_t SeekFirst(level_scanner *level_sc, void *start_key_buf)
 	level_sc->key_value.kv = (struct kv_format *)(MAPPED + lnode->kv_entry[middle].device_offt);
 	level_sc->key_value.deleted = lnode->kv_entry[middle].tombstone;
 
-	//printf("Found First:%s\n" , level_sc->key_value.kv + sizeof(uint32_t));
+	//printf("Found First:%s\n", level_sc->key_value.kv + sizeof(uint32_t));
 
 	return KREON_OK;
 }
@@ -1116,7 +1116,7 @@ int32_t SeekLast(level_scanner *level_sc, void *start_key_buf)
 	level_sc->key_value.kv = (struct kv_format *)(MAPPED + lnode->kv_entry[middle].device_offt);
 	level_sc->key_value.deleted = lnode->kv_entry[middle].tombstone;
 
-	//printf("Found Last:%s\n" , level_sc->key_value.kv + sizeof(uint32_t));
+	//printf("Found Last:%s\n", level_sc->key_value.kv->key_buf + sizeof(uint32_t));
 	//level_key_format = KV_FORMAT;
 	return KREON_OK;
 }
@@ -1144,6 +1144,8 @@ void seek_to_last(db_handle *handle, struct Kreoniterator *it)
 		exit(EXIT_FAILURE);
 	}
 
+	RWLOCK_RDLOCK(&handle->db_desc->levels[0].guard_of_level.rx_lock);
+
 	for (int i = 0; i < MAX_LEVELS; i++) {
 		for (int j = 0; j < NUM_TREES_PER_LEVEL; j++) {
 			it->sc->LEVEL_SCANNERS[i][j].valid = 0;
@@ -1154,10 +1156,13 @@ void seek_to_last(db_handle *handle, struct Kreoniterator *it)
 	active_tree = handle->db_desc->levels[0].active_tree;
 	it->sc->db = handle;
 	sh_init_max_heap(&it->sc->max_heap, active_tree);
-
 	for (int i = 0; i < NUM_TREES_PER_LEVEL; i++) {
 		struct node_header *root;
-		root = handle->db_desc->levels[0].root_r[i];
+
+		if (handle->db_desc->levels[0].root_w[i] != NULL)
+			root = handle->db_desc->levels[0].root_w[i];
+		else
+			root = handle->db_desc->levels[0].root_r[i];
 
 		if (root != NULL) {
 			it->sc->LEVEL_SCANNERS[0][i].db = handle;
@@ -1193,6 +1198,7 @@ void seek_to_last(db_handle *handle, struct Kreoniterator *it)
 				nd.type = KV_FORMAT;
 				nd.level_id = level_id;
 				nd.active_tree = tree_id;
+				//sh_insert_heap_node(&it->sc->heap,&nd);
 				sh_insert_max_heap_node(&it->sc->max_heap, &nd);
 				it->sc->LEVEL_SCANNERS[level_id][tree_id].valid = 1;
 			}
@@ -1212,6 +1218,8 @@ void seek_to_first(db_handle *handle, struct Kreoniterator *it)
 		exit(EXIT_FAILURE);
 	}
 
+	RWLOCK_RDLOCK(&handle->db_desc->levels[0].guard_of_level.rx_lock);
+
 	for (int i = 0; i < MAX_LEVELS; i++) {
 		for (int j = 0; j < NUM_TREES_PER_LEVEL; j++) {
 			it->sc->LEVEL_SCANNERS[i][j].valid = 0;
@@ -1221,11 +1229,16 @@ void seek_to_first(db_handle *handle, struct Kreoniterator *it)
 	it->sc->type = FULL_SCANNER;
 	active_tree = handle->db_desc->levels[0].active_tree;
 	it->sc->db = handle;
+
 	sh_init_heap(&it->sc->heap, active_tree);
 
 	for (int i = 0; i < NUM_TREES_PER_LEVEL; i++) {
 		struct node_header *root;
-		root = handle->db_desc->levels[0].root_r[i];
+
+		if (handle->db_desc->levels[0].root_w[i] != NULL)
+			root = handle->db_desc->levels[0].root_w[i];
+		else
+			root = handle->db_desc->levels[0].root_r[i];
 
 		if (root != NULL) {
 			it->sc->LEVEL_SCANNERS[0][i].db = handle;
@@ -1250,6 +1263,7 @@ void seek_to_first(db_handle *handle, struct Kreoniterator *it)
 		root = handle->db_desc->levels[level_id].root_w[tree_id];
 		if (!root)
 			root = handle->db_desc->levels[level_id].root_r[tree_id];
+
 		if (root != NULL) {
 			it->sc->LEVEL_SCANNERS[level_id][tree_id].db = handle;
 			it->sc->LEVEL_SCANNERS[level_id][tree_id].level_id = level_id;
@@ -1283,19 +1297,15 @@ int get_next(struct Kreoniterator *it)
 				next_nd.active_tree = nd.active_tree;
 				next_nd.type = nd.type;
 				next_nd.key_value = it->sc->LEVEL_SCANNERS[nd.level_id][nd.active_tree].key_value;
+				//printf("..-> %s\n", next_nd.key_value.kv->key_buf + sizeof(uint32_t));
 				sh_insert_heap_node(&it->sc->heap, &next_nd);
-			} else {
-				log_info("END of DB");
-				assert(0);
 			}
-
 			if (nd.duplicate == 1) {
 				continue;
 			}
 			return KREON_OK;
 		} else {
-			log_info("END of DB");
-			assert(0);
+			it->sc->key_value.kv = NULL;
 			return END_OF_DATABASE;
 		}
 	}
@@ -1315,15 +1325,16 @@ int get_prev(struct Kreoniterator *it)
 				next_nd.active_tree = nd.active_tree;
 				next_nd.type = nd.type;
 				next_nd.key_value = it->sc->LEVEL_SCANNERS[nd.level_id][nd.active_tree].key_value;
-				//	printf("%s\n", next_nd.KV + sizeof(uint32_t));
 				sh_insert_max_heap_node(&it->sc->max_heap, &next_nd);
 			}
-			if (nd.duplicate == 1) {
+			if (nd.duplicate == 1 || nd.key_value.deleted) {
 				continue;
 			}
 			return KREON_OK;
-		} else
+		} else {
+			it->sc->key_value.kv = NULL;
 			return END_OF_DATABASE;
+		}
 	}
 }
 
@@ -1378,8 +1389,11 @@ int32_t SeekKey(level_scanner *level_sc, void *start_key_buf)
 	element.node = NULL;
 	stack_push(&(level_sc->stack), element);
 	node = level_sc->root;
+
+	read_lock_node(level_sc, node);
 	if (node->type == leafRootNode && node->numberOfEntriesInNode == 0) {
 		//we seek in an empty tree
+		read_unlock_node(level_sc, node);
 		return END_OF_DATABASE;
 	}
 
@@ -1387,56 +1401,59 @@ int32_t SeekKey(level_scanner *level_sc, void *start_key_buf)
 		inode = (index_node *)node;
 		start_idx = 0;
 		end_idx = inode->header.numberOfEntriesInNode - 1;
-		middle = (start_idx + end_idx) / 2;
+		//middle = (start_idx + end_idx) / 2;
 		while (1) {
 			middle = (start_idx + end_idx) / 2;
 			addr = &(inode->p[middle].pivot);
 			full_pivot_key = (void *)(MAPPED + *(uint64_t *)addr);
 			ret = bt_key_cmp(full_pivot_key, start_key_buf, KV_FORMAT, KV_FORMAT);
 			if (ret == 0) {
-				addr = &(inode->p[middle].right[0]);
 				break;
 
 			} else if (ret > 0) {
 				end_idx = middle - 1;
 				if (start_idx > end_idx) {
-					addr = &(inode->p[middle].left[0]);
-					middle--;
 					break;
 				}
 			} else {
 				start_idx = middle + 1;
 				if (start_idx > end_idx) {
-					addr = &(inode->p[middle].right[0]);
 					break;
 				}
 			}
 		}
 
-		assert(middle < (int64_t)node->numberOfEntriesInNode);
 		element.node = node;
 		element.guard = 0;
-		if (middle <= 0) {
+
+		int num_entries = node->numberOfEntriesInNode;
+
+		if (ret <= 0)
+			node = (node_header *)(MAPPED + inode->p[middle].right[0]);
+		else
+			node = (node_header *)(MAPPED + inode->p[middle].left[0]);
+
+		read_lock_node(level_sc, node);
+
+		if (middle == 0 && ret > 0) {
 			element.leftmost = 1;
 			element.rightmost = 0;
 			element.idx = 0;
-			node = (node_header *)(MAPPED + inode->p[0].left[0]);
-			//printf("Went Left\n");
-		} else if (middle >= (int64_t)node->numberOfEntriesInNode - 1) {
+		} else if (middle >= (int64_t)num_entries - 1 && ret <= 0) {
 			element.leftmost = 0;
 			element.rightmost = 1;
 			element.idx = middle;
-			node = (node_header *)(MAPPED + inode->p[middle].right[0]);
-			//printf("Went Right\n");
 		} else {
 			element.leftmost = 0;
 			element.rightmost = 0;
-			element.idx = middle;
-			node = (node_header *)(MAPPED + inode->p[middle].right[0]);
-			//printf("Went Right\n");
+			if (ret > 0)
+				element.idx = --middle;
+			else
+				element.idx = middle;
 		}
 		stack_push(&(level_sc->stack), element);
 	}
+
 	if (start_key_buf == NULL)
 		memset(key_buf_prefix, 0, PREFIX_SIZE * sizeof(char));
 	else {
@@ -1457,7 +1474,7 @@ int32_t SeekKey(level_scanner *level_sc, void *start_key_buf)
 	while (start_idx <= end_idx) {
 		middle = (start_idx + end_idx) / 2;
 		index_key_prefix = &lnode->prefix[middle][0];
-		ret = prefix_compare(index_key_prefix, index_key_prefix, PREFIX_SIZE);
+		ret = prefix_compare(index_key_prefix, key_buf_prefix, PREFIX_SIZE);
 
 		if (ret < 0) {
 			start_idx = middle + 1;
@@ -1492,7 +1509,6 @@ int32_t SeekKey(level_scanner *level_sc, void *start_key_buf)
 		stack_push(&(level_sc->stack), element);
 		middle = 0;
 	} else if (middle >= (int64_t)lnode->header.numberOfEntriesInNode - 1) {
-		middle = lnode->header.numberOfEntriesInNode - 1;
 		element.node = node;
 		element.idx = 0;
 		element.leftmost = 0;
@@ -1512,18 +1528,19 @@ int32_t SeekKey(level_scanner *level_sc, void *start_key_buf)
 	level_sc->key_value.kv = (struct kv_format *)(MAPPED + lnode->kv_entry[middle].device_offt);
 	level_sc->key_value.deleted = lnode->kv_entry[middle].tombstone;
 
-	//printf("Found:%s\n" , level_sc->key_value.kv + sizeof(uint32_t));
+	//printf("Found:%s\n", level_sc->key_value.kv + sizeof(uint32_t));
 	return KREON_OK;
 }
 
-int MySeek(level_scanner *level_sc, void *start_key)
+int MySeek(level_scanner *level_sc, enum scanner_type type, void *start_key)
 {
 	stack_init(&level_sc->stack);
+	level_sc->type = type;
 	if (SeekKey(level_sc, start_key) == END_OF_DATABASE) {
 		stack_destroy(&(level_sc->stack));
 		return -1;
 	}
-	level_sc->type = LEVEL_SCANNER;
+	//level_sc->type = LEVEL_SCANNER;
 	return 0;
 }
 
@@ -1539,6 +1556,8 @@ int Seek(db_handle *handle, void *Keyname, struct Kreoniterator *it)
 		exit(EXIT_FAILURE);
 	}
 
+	RWLOCK_RDLOCK(&handle->db_desc->levels[0].guard_of_level.rx_lock);
+
 	for (int i = 0; i < MAX_LEVELS; i++) {
 		for (int j = 0; j < NUM_TREES_PER_LEVEL; j++) {
 			it->sc->LEVEL_SCANNERS[i][j].valid = 0;
@@ -1552,13 +1571,17 @@ int Seek(db_handle *handle, void *Keyname, struct Kreoniterator *it)
 
 	for (int i = 0; i < NUM_TREES_PER_LEVEL; i++) {
 		struct node_header *root;
-		root = handle->db_desc->levels[0].root_r[i];
+
+		if (handle->db_desc->levels[0].root_w[i] != NULL)
+			root = handle->db_desc->levels[0].root_w[i];
+		else
+			root = handle->db_desc->levels[0].root_r[i];
 
 		if (root != NULL) {
 			it->sc->LEVEL_SCANNERS[0][i].db = handle;
 			it->sc->LEVEL_SCANNERS[0][i].level_id = 0;
 			it->sc->LEVEL_SCANNERS[0][i].root = root;
-			retval = MySeek(&(it->sc->LEVEL_SCANNERS[0][i]), Keyname);
+			retval = MySeek(&(it->sc->LEVEL_SCANNERS[0][i]), FULL_SCANNER, Keyname);
 
 			if (retval == 0) {
 				it->sc->LEVEL_SCANNERS[0][i].valid = 1;
@@ -1581,7 +1604,7 @@ int Seek(db_handle *handle, void *Keyname, struct Kreoniterator *it)
 			it->sc->LEVEL_SCANNERS[level_id][tree_id].db = handle;
 			it->sc->LEVEL_SCANNERS[level_id][tree_id].level_id = level_id;
 			it->sc->LEVEL_SCANNERS[level_id][tree_id].root = root;
-			retval = MySeek(&it->sc->LEVEL_SCANNERS[level_id][tree_id], Keyname);
+			retval = MySeek(&it->sc->LEVEL_SCANNERS[level_id][tree_id], FULL_SCANNER, Keyname);
 			if (retval == 0) {
 				it->sc->LEVEL_SCANNERS[level_id][tree_id].valid = 1;
 				nd.key_value = it->sc->LEVEL_SCANNERS[level_id][tree_id].key_value;
@@ -1595,4 +1618,3 @@ int Seek(db_handle *handle, void *Keyname, struct Kreoniterator *it)
 	}
 	return 1;
 }
-#endif

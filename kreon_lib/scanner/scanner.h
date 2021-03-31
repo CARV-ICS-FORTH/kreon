@@ -35,6 +35,7 @@ typedef struct level_scanner {
 typedef struct scannerHandle {
 	level_scanner LEVEL_SCANNERS[MAX_LEVELS][NUM_TREES_PER_LEVEL];
 	struct sh_min_heap heap;
+	struct sh_max_heap max_heap;
 	struct sc_full_kv key_value;
 	db_handle *db;
 	int32_t type; /*to be removed also*/

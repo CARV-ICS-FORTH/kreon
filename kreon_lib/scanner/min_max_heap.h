@@ -26,6 +26,16 @@ struct sh_min_heap {
 	// int active_tree;
 };
 
+struct sh_max_heap {
+	struct sh_heap_node elem[HEAP_SIZE];
+	int size;
+	int active_tree;
+};
+
 void sh_init_heap(struct sh_min_heap *heap, int active_tree);
 void sh_insert_heap_node(struct sh_min_heap *hp, struct sh_heap_node *nd);
 enum sh_heap_status sh_remove_min(struct sh_min_heap *hp, struct sh_heap_node *heap_node);
+
+void sh_init_max_heap(struct sh_max_heap *heap, int active_tree);
+void sh_insert_max_heap_node(struct sh_max_heap *hp, struct sh_heap_node *nd);
+enum sh_heap_status sh_remove_max(struct sh_max_heap *hp, struct sh_heap_node *heap_node);
