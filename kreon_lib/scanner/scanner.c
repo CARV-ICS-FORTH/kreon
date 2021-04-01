@@ -1339,7 +1339,7 @@ int get_prev(struct Kreoniterator *it)
 }
 
 /*giostil change for testing the reverse spillbuffer scans*/
-level_scanner *_init_reverse_spill_buffer_scanner(db_handle *handle, node_header *node, void *start_key)
+level_scanner *_init_reverse_spill_buffer_scanner(db_handle *handle, node_header *node)
 {
 	level_scanner *level_sc;
 	level_sc = malloc(sizeof(level_scanner));
@@ -1366,20 +1366,16 @@ int32_t SeekKey(level_scanner *level_sc, void *start_key_buf)
 {
 	char key_buf_prefix[PREFIX_SIZE];
 	stackElementT element;
-	db_descriptor *db_desc = level_sc->db->db_desc;
 	void *full_pivot_key;
 	void *addr = NULL;
 	char *index_key_prefix;
 	index_node *inode;
 	leaf_node *lnode;
 	node_header *node;
-	node_header *node2;
 	int64_t ret;
-	uint32_t level_id = level_sc->level_id;
 	int32_t start_idx = 0;
 	int32_t end_idx = 0;
 	int32_t middle;
-	char level_key_format;
 
 	stack_reset(&(level_sc->stack));
 	element.guard = 1;
