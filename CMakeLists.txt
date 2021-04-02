@@ -41,9 +41,6 @@ if(NOT log_POPULATED)
   FetchContent_MakeAvailable(log)
 endif()
 
-include(CMakeconfig.txt)
-configure_file(config.h.in config.h @ONLY)
-
 # Compiler configuration
 if(NOT CMAKE_C_COMPILER)
   set(CMAKE_C_COMPILER "gcc")

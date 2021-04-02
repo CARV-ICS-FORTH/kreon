@@ -1,7 +1,5 @@
 # File: kreon/CMakeLists.txt Author: Michalis Vardoulakis <mvard@ics.forth.gr>
 
-include_directories(${CMAKE_CURRENT_BINARY_DIR})
-
 set(KREON_LIB kreon)
 
 set(KREON_C_SOURCE_FILES
