@@ -1543,74 +1543,7 @@ int MySeek(level_scanner *level_sc, enum scanner_type type, void *start_key)
 int Seek(db_handle *handle, void *Keyname, struct Kreoniterator *it)
 {
 	it->sc = (scannerHandle *)malloc(sizeof(scannerHandle));
-	struct sh_heap_node nd;
-	uint8_t active_tree;
-	int retval;
 
-	if (it->sc == NULL) {
-		log_fatal("NULL scannerHandle?");
-		exit(EXIT_FAILURE);
-	}
-
-	RWLOCK_RDLOCK(&handle->db_desc->levels[0].guard_of_level.rx_lock);
-
-	for (int i = 0; i < MAX_LEVELS; i++) {
-		for (int j = 0; j < NUM_TREES_PER_LEVEL; j++) {
-			it->sc->LEVEL_SCANNERS[i][j].valid = 0;
-		}
-	}
-
-	it->sc->type = FULL_SCANNER;
-	active_tree = handle->db_desc->levels[0].active_tree;
-	it->sc->db = handle;
-	sh_init_heap(&it->sc->heap, active_tree);
-
-	for (int i = 0; i < NUM_TREES_PER_LEVEL; i++) {
-		struct node_header *root;
-
-		if (handle->db_desc->levels[0].root_w[i] != NULL)
-			root = handle->db_desc->levels[0].root_w[i];
-		else
-			root = handle->db_desc->levels[0].root_r[i];
-
-		if (root != NULL) {
-			it->sc->LEVEL_SCANNERS[0][i].db = handle;
-			it->sc->LEVEL_SCANNERS[0][i].level_id = 0;
-			it->sc->LEVEL_SCANNERS[0][i].root = root;
-			retval = MySeek(&(it->sc->LEVEL_SCANNERS[0][i]), FULL_SCANNER, Keyname);
-
-			if (retval == 0) {
-				it->sc->LEVEL_SCANNERS[0][i].valid = 1;
-				nd.key_value = it->sc->LEVEL_SCANNERS[0][i].key_value;
-				nd.level_id = 0;
-				nd.type = KV_FORMAT;
-				nd.active_tree = active_tree;
-				sh_insert_heap_node(&it->sc->heap, &nd);
-			}
-		}
-	}
-
-	for (uint32_t level_id = 1; level_id < MAX_LEVELS; level_id++) {
-		struct node_header *root = NULL;
-		int tree_id = 0;
-		root = handle->db_desc->levels[level_id].root_w[tree_id];
-		if (!root)
-			root = handle->db_desc->levels[level_id].root_r[tree_id];
-		if (root != NULL) {
-			it->sc->LEVEL_SCANNERS[level_id][tree_id].db = handle;
-			it->sc->LEVEL_SCANNERS[level_id][tree_id].level_id = level_id;
-			it->sc->LEVEL_SCANNERS[level_id][tree_id].root = root;
-			retval = MySeek(&it->sc->LEVEL_SCANNERS[level_id][tree_id], FULL_SCANNER, Keyname);
-			if (retval == 0) {
-				it->sc->LEVEL_SCANNERS[level_id][tree_id].valid = 1;
-				nd.key_value = it->sc->LEVEL_SCANNERS[level_id][tree_id].key_value;
-				nd.type = KV_FORMAT;
-				nd.level_id = level_id;
-				nd.active_tree = tree_id;
-				sh_insert_heap_node(&it->sc->heap, &nd);
-				it->sc->LEVEL_SCANNERS[level_id][tree_id].valid = 1;
-			}
-		}
-	}
+	init_dirty_scanner(it->sc, handle, Keyname, GREATER_OR_EQUAL);
 	return 1;
 }
