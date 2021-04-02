@@ -44,6 +44,8 @@
 #define PG (4 * KB)
 #define MB (KB * KB)
 
+#define LEAF_NODE_SIZE 4096
+#define INDEX_NODE_SIZE 4096
 #define KEY_BLOCK_SIZE 8192 // 4KB
 
 /*from scan.c*/
