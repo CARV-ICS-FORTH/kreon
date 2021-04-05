@@ -10,7 +10,6 @@
 #define KV_SIZE 1024
 
 uint64_t num_keys;
-uint64_t scan_size;
 
 typedef struct key {
 	uint32_t key_size;
@@ -84,11 +83,10 @@ void seek_scan_test(db_handle *hd, void *keyname, struct Kreoniterator *it)
 		;
 }
 
-/* volume_name | number of keys | number of scans op */
+/* volume_name | number of keys*/
 int main(int argc, char *argv[])
 {
 	num_keys = atol(argv[2]);
-	scan_size = atol(argv[3]);
 	char *volume_name = strdup(argv[1]);
 
 	int64_t device_size;
