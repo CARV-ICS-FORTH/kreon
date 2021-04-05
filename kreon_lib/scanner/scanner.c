@@ -1074,9 +1074,10 @@ void seek_to_last(db_handle *handle, struct Kreoniterator *it)
 
 void seek_to_first(db_handle *handle, struct Kreoniterator *it)
 {
+	char smallest_char = '0';
 	it->sc = (scannerHandle *)malloc(sizeof(scannerHandle));
 
-	init_dirty_scanner(it->sc, handle, (void *)"0", GREATER_OR_EQUAL);
+	init_dirty_scanner(it->sc, handle, &smallest_char, GREATER_OR_EQUAL);
 }
 
 int get_next(struct Kreoniterator *it)
