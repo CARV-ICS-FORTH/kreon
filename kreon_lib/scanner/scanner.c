@@ -90,7 +90,7 @@ static void init_generic_scanner(struct scannerHandle *sc, struct db_handle *han
 	active_tree = handle->db_desc->levels[0].active_tree;
 	sc->db = handle;
 	sh_init_heap(&sc->heap, active_tree);
-
+	sh_init_max_heap(&sc->max_heap, active_tree);
 	for (int i = 0; i < NUM_TREES_PER_LEVEL; i++) {
 		struct node_header *root;
 		if (dirty) {
@@ -116,6 +116,7 @@ static void init_generic_scanner(struct scannerHandle *sc, struct db_handle *han
 				nd.active_tree = active_tree;
 				nd.type = KV_FORMAT;
 				sh_insert_heap_node(&sc->heap, &nd);
+				sh_insert_max_heap_node(&sc->max_heap, &nd);
 			}
 		}
 	}
@@ -144,6 +145,7 @@ static void init_generic_scanner(struct scannerHandle *sc, struct db_handle *han
 				nd.level_id = level_id;
 				nd.active_tree = tree_id;
 				sh_insert_heap_node(&sc->heap, &nd);
+				sh_insert_max_heap_node(&sc->max_heap, &nd);
 				sc->LEVEL_SCANNERS[level_id][tree_id].valid = 1;
 			}
 		}
@@ -1015,7 +1017,6 @@ void seek_to_last(struct db_handle *handle, struct scannerHandle *sc)
 	for (int i = 0; i < MAX_LEVELS; i++) {
 		for (int j = 0; j < NUM_TREES_PER_LEVEL; j++) {
 			sc->LEVEL_SCANNERS[i][j].valid = 0;
-			sc->LEVEL_SCANNERS[i][j].dirty = 1;
 		}
 	}
 

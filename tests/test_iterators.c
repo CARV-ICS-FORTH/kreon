@@ -50,19 +50,19 @@ void test_iterators(klc_handle hd)
 	while (klc_get_next(s))
 		count++;
 
-	assert(count == NUM_KEYS);
-	log_info("Found all keys serially\n");
+	log_info("Found keys serially\n");
 	//scan the db reversally
-	count = 0;
-	s = klc_init_scanner(hd, NULL, KLC_FETCH_LAST);
-	assert(klc_is_valid(s));
-	count = 1;
+	uint64_t rev_count = 0;
+	//klc_close_scanner(s);
+	klc_scanner s2 = klc_init_scanner(hd, NULL, KLC_FETCH_LAST);
+	assert(klc_is_valid(s2));
+	rev_count = 1;
 
-	while (klc_get_prev(s))
-		count++;
+	while (klc_get_prev(s2))
+		rev_count++;
 
-	klc_close_scanner(s);
-	assert(count == NUM_KEYS);
+	klc_close_scanner(s2);
+	assert(count == rev_count);
 	log_info("Found all keys reversally\n");
 	// Seek for the middle key (could be random)
 	struct klc_key k;
@@ -70,12 +70,23 @@ void test_iterators(klc_handle hd)
 	memcpy((char *)k.data, KEY_PREFIX, strlen(KEY_PREFIX));
 	sprintf((char *)k.data + strlen(KEY_PREFIX), "%llu", (long long unsigned)(NUM_KEYS / 2));
 	k.size = strlen(k.data) + 1;
-	klc_scanner s1 = klc_init_scanner(hd, NULL, KLC_FETCH_LAST);
-	klc_seek(hd, &k, s1);
+	klc_scanner seq_s3 = klc_init_scanner(hd, &k, KLC_GREATER_OR_EQUAL);
+	klc_seek(hd, &k, seq_s3);
 
-	struct klc_key keyptr = klc_get_key(s1);
+	struct klc_key keyptr = klc_get_key(seq_s3);
 	assert(!strcmp(k.data, keyptr.data));
 	log_info("Found middle key (NUM_KEYS/2) -> %s", k.data);
+
+	while (klc_get_next(seq_s3))
+		;
+
+	klc_scanner rev_s3 = klc_init_scanner(hd, &k, KLC_GREATER_OR_EQUAL);
+	klc_seek(hd, &k, rev_s3);
+
+	while (klc_get_prev(rev_s3))
+		;
+
+	log_info("Seek test ended, ending iterators test\n");
 }
 
 int main(int argc, char **argv)
