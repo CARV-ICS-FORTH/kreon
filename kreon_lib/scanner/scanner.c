@@ -984,7 +984,7 @@ static int32_t SeekLast(level_scanner *level_sc, void *start_key_buf)
 	level_sc->key_value.deleted = lnode->kv_entry[middle].tombstone;
 
 	//level_key_format = KV_FORMAT;
-	return KREON_OK;
+	return SUCCESS;
 }
 
 static int FindLast(level_scanner *level_sc, enum scanner_type type, void *start_key)
@@ -998,30 +998,31 @@ static int FindLast(level_scanner *level_sc, enum scanner_type type, void *start
 	return 0;
 }
 
-void seek_to_last(db_handle *handle, struct Kreoniterator *it)
+void seek_to_last(struct db_handle *handle, struct scannerHandle *sc)
 {
-	it->sc = (scannerHandle *)malloc(sizeof(scannerHandle));
 	struct sh_heap_node nd;
 	uint8_t active_tree;
 	int retval;
 
-	if (it->sc == NULL) {
+	if (sc == NULL) {
 		log_fatal("NULL scannerHandle?");
 		exit(EXIT_FAILURE);
 	}
 
+	//take read-lock(dirty scans)
 	RWLOCK_RDLOCK(&handle->db_desc->levels[0].guard_of_level.rx_lock);
 
 	for (int i = 0; i < MAX_LEVELS; i++) {
 		for (int j = 0; j < NUM_TREES_PER_LEVEL; j++) {
-			it->sc->LEVEL_SCANNERS[i][j].valid = 0;
+			sc->LEVEL_SCANNERS[i][j].valid = 0;
+			sc->LEVEL_SCANNERS[i][j].dirty = 1;
 		}
 	}
 
-	it->sc->type = FULL_SCANNER;
+	sc->type = FULL_SCANNER;
 	active_tree = handle->db_desc->levels[0].active_tree;
-	it->sc->db = handle;
-	sh_init_max_heap(&it->sc->max_heap, active_tree);
+	sc->db = handle;
+	sh_init_max_heap(&sc->max_heap, active_tree);
 	for (int i = 0; i < NUM_TREES_PER_LEVEL; i++) {
 		struct node_header *root;
 
@@ -1031,18 +1032,18 @@ void seek_to_last(db_handle *handle, struct Kreoniterator *it)
 			root = handle->db_desc->levels[0].root_r[i];
 
 		if (root != NULL) {
-			it->sc->LEVEL_SCANNERS[0][i].db = handle;
-			it->sc->LEVEL_SCANNERS[0][i].level_id = 0;
-			it->sc->LEVEL_SCANNERS[0][i].root = root;
-			retval = FindLast(&(it->sc->LEVEL_SCANNERS[0][i]), FULL_SCANNER, NULL);
+			sc->LEVEL_SCANNERS[0][i].db = handle;
+			sc->LEVEL_SCANNERS[0][i].level_id = 0;
+			sc->LEVEL_SCANNERS[0][i].root = root;
+			retval = FindLast(&(sc->LEVEL_SCANNERS[0][i]), FULL_SCANNER, NULL);
 
 			if (retval == 0) {
-				it->sc->LEVEL_SCANNERS[0][i].valid = 1;
-				nd.key_value = it->sc->LEVEL_SCANNERS[0][i].key_value;
+				sc->LEVEL_SCANNERS[0][i].valid = 1;
+				nd.key_value = sc->LEVEL_SCANNERS[0][i].key_value;
 				nd.level_id = 0;
 				nd.type = KV_FORMAT;
 				nd.active_tree = active_tree;
-				sh_insert_max_heap_node(&it->sc->max_heap, &nd);
+				sh_insert_max_heap_node(&sc->max_heap, &nd);
 			}
 		}
 	}
@@ -1054,30 +1055,37 @@ void seek_to_last(db_handle *handle, struct Kreoniterator *it)
 		if (!root)
 			root = handle->db_desc->levels[level_id].root_r[tree_id];
 		if (root != NULL) {
-			it->sc->LEVEL_SCANNERS[level_id][tree_id].db = handle;
-			it->sc->LEVEL_SCANNERS[level_id][tree_id].level_id = level_id;
-			it->sc->LEVEL_SCANNERS[level_id][tree_id].root = root;
-			retval = FindLast(&it->sc->LEVEL_SCANNERS[level_id][tree_id], FULL_SCANNER, NULL);
+			sc->type = FULL_SCANNER;
+			sc->LEVEL_SCANNERS[level_id][tree_id].db = handle;
+			sc->LEVEL_SCANNERS[level_id][tree_id].level_id = level_id;
+			sc->LEVEL_SCANNERS[level_id][tree_id].root = root;
+			retval = FindLast(&sc->LEVEL_SCANNERS[level_id][tree_id], FULL_SCANNER, NULL);
 			if (retval == 0) {
-				it->sc->LEVEL_SCANNERS[level_id][tree_id].valid = 1;
-				nd.key_value = it->sc->LEVEL_SCANNERS[level_id][tree_id].key_value;
+				sc->LEVEL_SCANNERS[level_id][tree_id].valid = 1;
+				nd.key_value = sc->LEVEL_SCANNERS[level_id][tree_id].key_value;
 				nd.type = KV_FORMAT;
 				nd.level_id = level_id;
 				nd.active_tree = tree_id;
 				//sh_insert_heap_node(&it->sc->heap,&nd);
-				sh_insert_max_heap_node(&it->sc->max_heap, &nd);
-				it->sc->LEVEL_SCANNERS[level_id][tree_id].valid = 1;
+				sh_insert_max_heap_node(&sc->max_heap, &nd);
+				sc->LEVEL_SCANNERS[level_id][tree_id].valid = 1;
 			}
 		}
 	}
+
+	if (getPrev(sc) == END_OF_DATABASE) {
+		sc->key_value.kv = NULL;
+		//log_warn("Reached end of database");
+		memset(&sc->key_value, 0x00, sizeof(struct sc_full_kv));
+	}
+	return;
 }
 
-void seek_to_first(db_handle *handle, struct Kreoniterator *it)
+void seek_to_first(db_handle *handle, scannerHandle *sc)
 {
 	char smallest_char = '0';
-	it->sc = (scannerHandle *)malloc(sizeof(scannerHandle));
 
-	init_dirty_scanner(it->sc, handle, &smallest_char, GREATER_OR_EQUAL);
+	init_dirty_scanner(sc, handle, &smallest_char, GREATER_OR_EQUAL);
 }
 
 int get_next(struct Kreoniterator *it)
@@ -1091,37 +1099,40 @@ int get_next(struct Kreoniterator *it)
 	return getNext(it->sc);
 }
 
-int get_prev(struct Kreoniterator *it)
+int getPrev(scannerHandle *sc)
 {
 	enum sh_heap_status stat;
 	struct sh_heap_node nd;
 	struct sh_heap_node next_nd;
 	while (1) {
-		stat = sh_remove_max(&it->sc->max_heap, &nd);
+		stat = sh_remove_max(&sc->max_heap, &nd);
 		if (stat != EMPTY_MIN_HEAP) {
-			it->sc->key_value = nd.key_value;
-			if (_get_prev_KV(&(it->sc->LEVEL_SCANNERS[nd.level_id][nd.active_tree])) != END_OF_DATABASE) {
+			sc->key_value = nd.key_value;
+			if (_get_prev_KV(&(sc->LEVEL_SCANNERS[nd.level_id][nd.active_tree])) != END_OF_DATABASE) {
 				next_nd.level_id = nd.level_id;
 				next_nd.active_tree = nd.active_tree;
 				next_nd.type = nd.type;
-				next_nd.key_value = it->sc->LEVEL_SCANNERS[nd.level_id][nd.active_tree].key_value;
-				sh_insert_max_heap_node(&it->sc->max_heap, &next_nd);
+				next_nd.key_value = sc->LEVEL_SCANNERS[nd.level_id][nd.active_tree].key_value;
+				sh_insert_max_heap_node(&sc->max_heap, &next_nd);
 			}
 			if (nd.duplicate == 1 || nd.key_value.deleted) {
 				continue;
 			}
 			return KREON_OK;
 		} else {
-			it->sc->key_value.kv = NULL;
+			sc->key_value.kv = NULL;
 			return END_OF_DATABASE;
 		}
 	}
 }
 
-int Seek(db_handle *handle, void *Keyname, struct Kreoniterator *it)
+void Seek(db_handle *handle, const char *key_buf, uint32_t key_size, scannerHandle *sc)
 {
-	it->sc = (scannerHandle *)malloc(sizeof(scannerHandle));
+	char buf[key_size];
+	int *size = (int *)buf;
+	*size = key_size;
 
-	init_dirty_scanner(it->sc, handle, Keyname, GREATER_OR_EQUAL);
-	return 1;
+	memcpy(&buf[sizeof(int)], key_buf, key_size);
+
+	init_dirty_scanner(sc, handle, buf, GREATER_OR_EQUAL);
 }
