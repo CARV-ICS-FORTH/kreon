@@ -180,7 +180,16 @@ init_scanner:
 
 init_reverse_scanner:
 	sc = (struct scannerHandle *)calloc(1, sizeof(struct scannerHandle));
+	if (sc == NULL) {
+		log_fatal("Calloc failed");
+		exit(EXIT_FAILURE);
+	}
 	klc_s = (struct klc_scanner *)calloc(1, sizeof(struct klc_scanner));
+
+	if (klc_s == NULL) {
+		log_fatal("Calloc failed");
+		exit(EXIT_FAILURE);
+	}
 
 	seek_to_last(hd, sc);
 	klc_s->sc = sc;
@@ -192,15 +201,19 @@ init_reverse_scanner:
 		klc_s->valid = 0;
 	else {
 		klc_s->valid = 1;
-		uint32_t kv_size = sc->key_value.kv->key_size + sizeof(struct kv_format);
-		struct kv_format *v = (struct kv_format *)((uint64_t)sc->key_value.kv + kv_size);
-		kv_size += (v->key_size + sizeof(struct kv_format));
+		uint32_t kv_size = sizeof(struct kv_format) + sc->key_value.kv->key_size;
+		struct kv_format *v = (struct kv_format *)((char *)sc->key_value.kv + kv_size);
+		kv_size += (sizeof(struct kv_format) + v->key_size);
 		if (kv_size > klc_s->buf_size) {
 			if (klc_s->allocated)
 				free(klc_s->kv_buf);
 			klc_s->buf_size = kv_size;
 			klc_s->allocated = 1;
 			klc_s->kv_buf = calloc(1, klc_s->buf_size);
+			if (klc_s->kv_buf == NULL) {
+				log_fatal("Calloc failed");
+				exit(EXIT_FAILURE);
+			}
 		}
 		memcpy(klc_s->kv_buf, sc->key_value.kv, klc_s->buf_size);
 	}
@@ -230,9 +243,9 @@ int klc_get_next(klc_scanner s)
 		klc_s->valid = 0;
 		return 0;
 	}
-	uint32_t kv_size = sc->key_value.kv->key_size + sizeof(struct kv_format);
-	struct kv_format *v = (struct kv_format *)((uint64_t)sc->key_value.kv + kv_size);
-	kv_size += v->key_size + sizeof(struct kv_format);
+	uint32_t kv_size = sizeof(struct kv_format) + sc->key_value.kv->key_size;
+	struct kv_format *v = (struct kv_format *)((char *)sc->key_value.kv + kv_size);
+	kv_size += sizeof(struct kv_format) + v->key_size;
 	if (kv_size > klc_s->buf_size) {
 		//log_info("Space not enougn needing %u got %u", kv_size, klc_s->buf_size);
 		if (klc_s->allocated)
@@ -241,6 +254,10 @@ int klc_get_next(klc_scanner s)
 		klc_s->buf_size = kv_size;
 		klc_s->allocated = 1;
 		klc_s->kv_buf = calloc(1, klc_s->buf_size);
+		if (klc_s->kv_buf == NULL) {
+			log_fatal("Calloc failed");
+			exit(EXIT_FAILURE);
+		}
 	}
 	memcpy(klc_s->kv_buf, sc->key_value.kv, klc_s->buf_size);
 	return 1;
@@ -256,7 +273,7 @@ int klc_get_prev(klc_scanner s)
 		return 0;
 	}
 	uint32_t kv_size = sc->key_value.kv->key_size + sizeof(struct kv_format);
-	struct kv_format *v = (struct kv_format *)((uint64_t)sc->key_value.kv + kv_size);
+	struct kv_format *v = (struct kv_format *)((char *)sc->key_value.kv + kv_size);
 	kv_size += v->key_size + sizeof(struct kv_format);
 	if (kv_size > klc_s->buf_size) {
 		//log_info("Space not enougn needing %u got %u", kv_size, klc_s->buf_size);
@@ -266,6 +283,10 @@ int klc_get_prev(klc_scanner s)
 		klc_s->buf_size = kv_size;
 		klc_s->allocated = 1;
 		klc_s->kv_buf = calloc(1, klc_s->buf_size);
+		if (klc_s->kv_buf == NULL) {
+			log_fatal("Calloc failed");
+			exit(EXIT_FAILURE);
+		}
 	}
 	memcpy(klc_s->kv_buf, sc->key_value.kv, klc_s->buf_size);
 	return 1;
@@ -290,6 +311,10 @@ int klc_seek(klc_handle handle, struct klc_key *key, klc_scanner s)
 		klc_s->buf_size = kv_size;
 		klc_s->allocated = 1;
 		klc_s->kv_buf = calloc(1, klc_s->buf_size);
+		if (klc_s->kv_buf == NULL) {
+			log_fatal("Calloc failed");
+			exit(EXIT_FAILURE);
+		}
 	}
 	memcpy(klc_s->kv_buf, sc->key_value.kv, klc_s->buf_size);
 	return 1;

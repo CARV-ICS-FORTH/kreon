@@ -1129,11 +1129,29 @@ int getPrev(scannerHandle *sc)
 
 void Seek(db_handle *handle, const char *key_buf, uint32_t key_size, scannerHandle *sc)
 {
-	char buf[key_size];
-	int *size = (int *)buf;
+	char buf[255];
+	int *size;
+	char *big_key_buf = NULL;
+
+	if (key_size > 255) {
+		big_key_buf = (char *)malloc(sizeof(char) * key_size);
+		if (big_key_buf == NULL) {
+			log_fatal("Malloc failed");
+			exit(EXIT_FAILURE);
+		}
+		size = (int *)big_key_buf;
+		*size = key_size;
+		memcpy(&big_key_buf[sizeof(*size)], key_buf, key_size);
+
+		init_dirty_scanner(sc, handle, big_key_buf, GREATER_OR_EQUAL);
+		return;
+	}
+
+	size = (int *)buf;
+
 	*size = key_size;
 
-	memcpy(&buf[sizeof(int)], key_buf, key_size);
+	memcpy(&buf[sizeof(*size)], key_buf, key_size);
 
 	init_dirty_scanner(sc, handle, buf, GREATER_OR_EQUAL);
 }
