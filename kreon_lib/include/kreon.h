@@ -20,7 +20,7 @@
 
 typedef void *klc_handle;
 typedef void *klc_scanner;
-typedef enum klc_seek_mode { KLC_GREATER, KLC_GREATER_OR_EQUAL, KLC_FETCH_FIRST } klc_seek_mode;
+typedef enum klc_seek_mode { KLC_GREATER, KLC_GREATER_OR_EQUAL, KLC_FETCH_FIRST, KLC_FETCH_LAST } klc_seek_mode;
 
 typedef enum klc_ret_code {
 	KLC_SUCCESS = 0,
@@ -73,6 +73,10 @@ klc_scanner klc_init_scanner(klc_handle db_handle, struct klc_key *key, klc_seek
 void klc_close_scanner(klc_scanner sc);
 // Advances the scanner iterator to the next key-value.
 int klc_get_next(klc_scanner sc);
+// Advances the scanner iterator to the previous key-value.
+int klc_get_prev(klc_scanner sc);
+// Places the scanner iterator to the wanted key-value
+int klc_seek(klc_handle db_handle, struct klc_key *key, klc_scanner sc);
 // Checks the scanner if the current key-value is valid else we reached the end of database.
 int klc_is_valid(klc_scanner sc);
 // Takes a scanner and returns the current key size + key in the iterator.

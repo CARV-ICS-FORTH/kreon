@@ -4,134 +4,133 @@
 #include <string.h>
 #include <stdlib.h>
 #include <log.h>
-#include "../kreon_lib/btree/btree.h"
-#include "../kreon_lib/scanner/scanner.h"
+#include <kreon.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+
 #define KEY_PREFIX "userakias_computerakias"
 #define KV_SIZE 1024
+#define NUM_KEYS 1000000
+#define NUM_OF_ROUNDS 1
+#define BASE 1000000
 
-uint64_t num_keys;
-
-typedef struct key {
-	uint32_t key_size;
-	char key_buf[];
-} key;
-
-typedef struct value {
-	uint32_t value_size;
-	char value_buf[0];
-} value;
-
-void insert_keys(db_handle *hd)
+void test_iterators(klc_handle hd)
 {
-	bt_insert_req req;
-	uint64_t i;
-	key *k = (key *)alloca(KV_SIZE);
-
-	log_info("Starting population for %lu keys...", num_keys);
-	for (i = 0; i < num_keys; i++) {
-		memcpy(k->key_buf, KEY_PREFIX, strlen(KEY_PREFIX));
-		sprintf(k->key_buf + strlen(KEY_PREFIX), "%llu", (long long unsigned)i);
-		k->key_size = strlen(k->key_buf) + 1;
-		value *v = (value *)((uint64_t)k + sizeof(key) + k->key_size);
-		v->value_size = KV_SIZE - ((2 * sizeof(key)) + k->key_size);
-		memset(v->value_buf, 0xDD, v->value_size);
-
-		req.metadata.handle = hd;
-		req.metadata.kv_size = k->key_size + v->value_size + (2 * sizeof(uint32_t));
-		assert(req.metadata.kv_size == KV_SIZE);
-		req.key_value_buf = k;
-		req.metadata.level_id = 0;
-		req.metadata.key_format = KV_FORMAT;
-		req.metadata.append_to_log = 1;
-		req.metadata.gc_request = 0;
-		req.metadata.recovery_request = 0;
-		_insert_key_value(&req);
+	struct klc_key_value kv;
+	uint64_t i = 0;
+	uint64_t j = 0;
+	kv.k.data = (char *)malloc(KV_SIZE);
+	if (kv.k.data == NULL) {
+		log_fatal("Malloc failed");
+		exit(EXIT_FAILURE);
 	}
-	log_info("Population ended");
-}
+	kv.v.data = (char *)malloc(KV_SIZE);
+	if (kv.v.data == NULL) {
+		log_fatal("Malloc failed");
+		exit(EXIT_FAILURE);
+	}
 
-void scan_db_serially(db_handle *hd, struct Kreoniterator *it)
-{
-	seek_to_first(hd, it);
-	while (get_next(it) != END_OF_DATABASE)
-		;
-}
+	for (int round = 0; round < NUM_OF_ROUNDS; ++round) {
+		log_info("Round %d Starting population for %lu keys...", round, NUM_KEYS);
+		int local_base = BASE + (round * NUM_KEYS);
+		for (i = local_base; i < local_base + NUM_KEYS; i++) {
+			memcpy((char *)kv.k.data, KEY_PREFIX, strlen(KEY_PREFIX));
+			sprintf((char *)kv.k.data + strlen(KEY_PREFIX), "%llu", (long long unsigned)i);
+			kv.k.size = strlen(kv.k.data) + 1;
+			kv.v.size = KV_SIZE;
+			memset((char *)kv.v.data, 0XDD, kv.v.size);
+			if (klc_put(hd, &kv) != KLC_SUCCESS) {
+				log_fatal("Put failed");
+				exit(EXIT_FAILURE);
+			}
+		}
+	}
+	log_info("Population ended, snapshot and testing iterators");
+	klc_sync(hd);
 
-void scan_db_reversally(db_handle *hd, struct Kreoniterator *it)
-{
-	seek_to_last(hd, it);
-	while (get_prev(it) != END_OF_DATABASE)
-		;
-}
+	//scan the db serially
+	klc_scanner s = klc_init_scanner(hd, NULL, KLC_FETCH_FIRST);
+	assert(klc_is_valid(s));
+	int64_t scan_size = NUM_KEYS;
 
-void scan_db_serially_and_reversally(db_handle *hd, struct Kreoniterator *it)
-{
-	seek_to_first(hd, it);
-	while (get_next(it) != END_OF_DATABASE)
-		;
-
-	seek_to_last(hd, it);
-	while (get_prev(it) != END_OF_DATABASE)
-		;
-}
-
-void seek_scan_test(db_handle *hd, void *keyname, struct Kreoniterator *it)
-{
-	Seek(hd, keyname, it);
-
-	while (get_next(it) != END_OF_DATABASE)
-		;
-}
-
-/* volume_name | number of keys*/
-int main(int argc, char *argv[])
-{
-	num_keys = atol(argv[2]);
-	char *volume_name = strdup(argv[1]);
-
-	int64_t device_size;
-	FD = open(volume_name, O_RDWR);
-	if (ioctl(FD, BLKGETSIZE64, &device_size) == -1) {
-		device_size = lseek(FD, 0, SEEK_END);
-		if (device_size == -1) {
-			log_fatal("failed to determine volume size exiting...");
-			perror("ioctl");
+	for (int64_t j = 1; j < scan_size; j++) {
+		memcpy((char *)kv.k.data, KEY_PREFIX, strlen(KEY_PREFIX));
+		sprintf((char *)kv.k.data + strlen(KEY_PREFIX), "%llu", (long long unsigned)BASE + j);
+		kv.k.size = strlen(kv.k.data) + 1;
+		if (klc_get_next(s) && !klc_is_valid(s)) {
+			log_fatal("DB end at key %s is this correct? NO", kv.k.data);
 			exit(EXIT_FAILURE);
+		}
+		struct klc_key keyptr = klc_get_key(s);
+
+		if (kv.k.size != keyptr.size || memcmp(kv.k.data, keyptr.data, kv.k.size) != 0) {
+			log_fatal("Test failed key %s not found scanner instead returned %s", kv.k.data, keyptr);
 		}
 	}
 
-	db_handle *hd = db_open(volume_name, 0, device_size, "test_iterators", CREATE_DB);
+	log_info("Found keys serially\n");
+	klc_close_scanner(s);
+	//scan the db reversally
+	//klc_close_scanner(s);
+	klc_scanner s2 = klc_init_scanner(hd, NULL, KLC_FETCH_LAST);
+	assert(klc_is_valid(s2));
+	scan_size = NUM_KEYS;
 
-	insert_keys(hd);
-	snapshot(hd->volume_desc);
+	//cant declare j as unsinged because of wrap arround
+	for (int64_t j = scan_size - 2; j >= 0; j--) {
+		memcpy((char *)kv.k.data, KEY_PREFIX, strlen(KEY_PREFIX));
+		sprintf((char *)kv.k.data + strlen(KEY_PREFIX), "%llu", (long long unsigned)BASE + j);
+		kv.k.size = strlen(kv.k.data) + 1;
+		if (klc_get_prev(s2) && !klc_is_valid(s2)) {
+			log_fatal("DB end at key %s is this correct? NO", kv.k.data);
+			exit(EXIT_FAILURE);
+		}
 
-	struct Kreoniterator *it = (struct Kreoniterator *)malloc(sizeof(struct Kreoniterator));
+		struct klc_key keyptr = klc_get_key(s2);
+		if (kv.k.size != keyptr.size || memcmp(kv.k.data, keyptr.data, kv.k.size) != 0) {
+			log_fatal("Test failed key %s not found scanner instead returned %s", kv.k.data, keyptr);
+		}
+	}
+	klc_close_scanner(s2);
+	log_info("found keys reversally, ending iterators test");
+	free((char *)kv.k.data);
+	free((char *)kv.v.data);
+}
 
-	scan_db_serially(hd, it);
+int main(int argc, char **argv)
+{
+	char *db_name = "test_iterators";
 
-	scan_db_reversally(hd, it);
+	klc_db_options db_options;
 
-	scan_db_serially_and_reversally(hd, it);
+	int64_t size;
+	int fd = open(argv[1], O_RDWR);
+	if (fd == -1) {
+		perror("open");
+		exit(EXIT_FAILURE);
+	}
+	size = lseek(fd, 0, SEEK_END);
+	if (size == -1) {
+		log_fatal("failed to determine file size exiting...");
+		perror("ioctl");
+		exit(EXIT_FAILURE);
+	}
 
-	//find key 72
-	key *k = (key *)alloca(KV_SIZE);
-	memcpy(k->key_buf, KEY_PREFIX, strlen(KEY_PREFIX));
-	sprintf(k->key_buf + strlen(KEY_PREFIX), "%llu", (long long unsigned)72);
-	k->key_size = strlen(k->key_buf) + 1;
-	value *v = (value *)((uint64_t)k + sizeof(key) + k->key_size);
-	v->value_size = KV_SIZE - ((2 * sizeof(key)) + k->key_size);
-	memset(v->value_buf, 0xDD, v->value_size);
+	close(fd);
+	log_info("Size is %lld", size);
+	volume_init(argv[1], 0, size, 1);
+	db_options.volume_size = size;
 
-	seek_scan_test(hd, (void *)k, it);
+	db_options.volume_start = 0;
+	db_options.volume_name = argv[1];
 
-	//find key 81231
+	db_options.create_flag = KLC_CREATE_DB;
 
-	memcpy(k->key_buf, KEY_PREFIX, strlen(KEY_PREFIX));
-	sprintf(k->key_buf + strlen(KEY_PREFIX), "%llu", (long long unsigned)81231);
-	k->key_size = strlen(k->key_buf) + 1;
-	v = (value *)((uint64_t)k + sizeof(key) + k->key_size);
-	v->value_size = KV_SIZE - ((2 * sizeof(key)) + k->key_size);
-	memset(v->value_buf, 0xDD, v->value_size);
+	klc_handle hd;
+	db_options.db_name = db_name;
+	hd = klc_open(&db_options);
 
-	seek_scan_test(hd, (void *)k, it);
+	test_iterators(hd);
 }

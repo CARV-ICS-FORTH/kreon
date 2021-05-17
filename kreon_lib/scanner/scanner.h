@@ -83,12 +83,12 @@ void _close_spill_buffer_scanner(level_scanner *sc, node_header *root);
 int32_t _get_next_KV(level_scanner *sc);
 int32_t _get_prev_KV(level_scanner *sc);
 
-void seek_to_first(db_handle *, struct Kreoniterator *);
+void seek_to_first(db_handle *, scannerHandle *sc);
 
-void seek_to_last(db_handle *, struct Kreoniterator *);
+void seek_to_last(db_handle *, scannerHandle *sc);
 
 int get_next(struct Kreoniterator *it);
 
-int get_prev(struct Kreoniterator *it);
+int getPrev(scannerHandle *sc);
 
-int Seek(db_handle *hd, void *Keyname, struct Kreoniterator *it);
+void Seek(db_handle *hd, const char *Key, uint32_t key_size, scannerHandle *sc);
