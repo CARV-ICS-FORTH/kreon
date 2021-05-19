@@ -300,6 +300,11 @@ int klc_seek(klc_handle handle, struct klc_key *key, klc_scanner s)
 
 	Seek(dbhandle, key->data, key->size, sc);
 
+	if (sc->key_value.kv == NULL) {
+		klc_s->valid = 0;
+		return 0;
+	}
+
 	uint32_t kv_size = sc->key_value.kv->key_size + sizeof(struct kv_format);
 	struct kv_format *v = (struct kv_format *)((uint64_t)sc->key_value.kv + kv_size);
 	kv_size += v->key_size + sizeof(struct kv_format);
