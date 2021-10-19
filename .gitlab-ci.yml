@@ -36,7 +36,7 @@ build_clang-tidy:
 #     - make install DESTDIR=$KREON_INSTALL_PATH;mv $KREON_INSTALL_PATH ../scripts/;cd ../scripts
 #     - ./verify-installed-files.py $KREON_INSTALL_PATH
 
-automogate-git-sync:
+automate-github-sync:
   image: carvicsforth/ubuntu_carv:latest
   stage: deploy
   only:
